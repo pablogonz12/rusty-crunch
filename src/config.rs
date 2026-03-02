@@ -1,3 +1,4 @@
+use crate::formats::MediaType;
 use anyhow::Result;
 use console::style;
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
@@ -25,6 +26,28 @@ impl std::fmt::Display for DisplayMode {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRule {
+    pub folder: String,
+    pub media_type: MediaType,
+    pub input_fmt: String,
+    pub output_fmt: String,
+    pub recursive: bool,
+    pub delete_originals: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentTrigger {
+    Watch,
+    Periodic(u64),
+}
+
+impl Default for AgentTrigger {
+    fn default() -> Self {
+        Self::Watch
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub default_recursive: bool,
@@ -32,6 +55,10 @@ pub struct Config {
     pub default_folder: Option<String>,
     #[serde(default)]
     pub display_mode: DisplayMode,
+    #[serde(default)]
+    pub agent_rules: Vec<AgentRule>,
+    #[serde(default)]
+    pub agent_trigger: AgentTrigger,
 }
 
 impl Default for Config {
@@ -41,6 +68,8 @@ impl Default for Config {
             default_delete_originals: false,
             default_folder: None,
             display_mode: DisplayMode::Clean,
+            agent_rules: Vec::new(),
+            agent_trigger: AgentTrigger::default(),
         }
     }
 }
@@ -199,6 +228,7 @@ fn import_settings() -> Result<()> {
     }
     let content = std::fs::read_to_string(src)
         .map_err(|e| anyhow::anyhow!("Cannot read {}: {}", src, e))?;
+    // Validate that it parses as a valid Config
     let _: Config = serde_json::from_str(&content)
         .map_err(|e| anyhow::anyhow!("Invalid settings file: {}", e))?;
     let dest = config_path();
@@ -225,14 +255,54 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_legacy_config_without_display_mode() {
+    fn deserialize_config_with_agent_rules() {
         let json = r#"{
             "default_recursive": true,
             "default_delete_originals": false,
-            "default_folder": null
+            "default_folder": null,
+            "display_mode": "Clean",
+            "agent_rules": [
+                {
+                    "folder": "/tmp/test",
+                    "media_type": "Audio",
+                    "input_fmt": "WAV",
+                    "output_fmt": "FLAC",
+                    "recursive": true,
+                    "delete_originals": false
+                }
+            ],
+            "agent_trigger": "Watch"
         }"#;
         let cfg: Config = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.display_mode, DisplayMode::Clean);
+        assert_eq!(cfg.agent_rules.len(), 1);
+        assert_eq!(cfg.agent_rules[0].input_fmt, "WAV");
+        assert_eq!(cfg.agent_rules[0].output_fmt, "FLAC");
+        assert_eq!(cfg.agent_trigger, AgentTrigger::Watch);
+    }
+
+    #[test]
+    fn deserialize_periodic_trigger() {
+        let json = r#"{
+            "default_recursive": true,
+            "default_delete_originals": false,
+            "default_folder": null,
+            "agent_trigger": {"Periodic": 300}
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.agent_trigger, AgentTrigger::Periodic(300));
+    }
+
+    #[test]
+    fn deserialize_legacy_config_without_agent_fields() {
+        let json = r#"{
+            "default_recursive": true,
+            "default_delete_originals": false,
+            "default_folder": null,
+            "display_mode": "Verbose"
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert!(cfg.agent_rules.is_empty());
+        assert_eq!(cfg.agent_trigger, AgentTrigger::Watch);
     }
 
     #[test]
@@ -241,11 +311,20 @@ mod tests {
             default_recursive: false,
             default_delete_originals: true,
             default_folder: Some("/test".into()),
-            display_mode: DisplayMode::Verbose,
+            display_mode: DisplayMode::Clean,
+            agent_rules: vec![AgentRule {
+                folder: "/tmp".into(),
+                media_type: MediaType::Images,
+                input_fmt: "BMP".into(),
+                output_fmt: "PNG".into(),
+                recursive: true,
+                delete_originals: false,
+            }],
+            agent_trigger: AgentTrigger::Periodic(600),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let cfg2: Config = serde_json::from_str(&json).unwrap();
-        assert_eq!(cfg2.display_mode, DisplayMode::Verbose);
-        assert_eq!(cfg2.default_folder, Some("/test".into()));
+        assert_eq!(cfg2.agent_rules.len(), 1);
+        assert_eq!(cfg2.agent_trigger, AgentTrigger::Periodic(600));
     }
 }

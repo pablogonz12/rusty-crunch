@@ -1,3 +1,4 @@
+mod agent;
 mod config;
 mod converter;
 mod deps;
@@ -19,6 +20,18 @@ struct Cli {
     #[arg(long)]
     dry_run: bool,
 
+    /// Run the agent as a background service (reads rules from config)
+    #[arg(long)]
+    agent: bool,
+
+    /// Stop a running background agent
+    #[arg(long)]
+    agent_stop: bool,
+
+    /// Check if the background agent is currently running
+    #[arg(long)]
+    agent_status: bool,
+
     /// Folder to process (skips the directory browser)
     #[arg(value_name = "FOLDER")]
     folder: Option<PathBuf>,
@@ -27,16 +40,33 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    if cli.agent {
+        return agent::run_headless();
+    }
+    if cli.agent_stop {
+        return agent::stop_background();
+    }
+    if cli.agent_status {
+        return agent::show_status();
+    }
+
     loop {
         let display_mode = config::load().display_mode;
         maybe_clear(display_mode);
         banner();
+
+        let agent_label = if cfg!(target_os = "macos") {
+            "🤖 Agent Mode [ALPHA]"
+        } else {
+            "🤖 Agent Mode [BETA]"
+        };
 
         let menu = Select::with_theme(&ColorfulTheme::default())
             .with_prompt("What would you like to do?")
             .items(&[
                 "🔧 Start Crunching",
                 "🚀 Recommended Crunch",
+                agent_label,
                 "⚙️  Settings",
                 "🚪 Exit",
             ])
@@ -46,7 +76,8 @@ fn main() -> Result<()> {
         match menu {
             Some(0) => run_crunch(&cli)?,
             Some(1) => run_recommended_crunch(&cli)?,
-            Some(2) => config::edit_settings()?,
+            Some(2) => agent::setup()?,
+            Some(3) => config::edit_settings()?,
             _ => {
                 println!("  {} Bye!\n", style("👋").cyan());
                 break;
@@ -77,7 +108,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
                     media = Some(m);
                     step = 1;
                 }
-                None => return Ok(()),
+                None => return Ok(()), // Esc at first step → back to main menu
             },
 
             // ── Deps + Input format ─────────────────────────────────
@@ -100,14 +131,17 @@ fn run_crunch(cli: &Cli) -> Result<()> {
                 let inf = input_fmt.unwrap();
                 match prompt::select_output_format(m, inf)? {
                     Some(f) => {
+                        // Show lossy warning if applicable
                         match prompt::lossy_warning(m, inf, f)? {
                             Some(true) => {
                                 ack("Output format", f);
                                 output_fmt = Some(f);
                                 step = 3;
                             }
-                            Some(false) => {}
-                            None => step = 1,
+                            Some(false) => {
+                                // User declined — re-pick output format
+                            }
+                            None => step = 1, // Escape → back to input format
                         }
                     }
                     None => step = 1,
@@ -166,6 +200,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
         }
     }
 
+    // Unwrap all steps (guaranteed by the state machine)
     let media = media.unwrap();
     let input_fmt = input_fmt.unwrap();
     let output_fmt = output_fmt.unwrap();
@@ -203,6 +238,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
     println!("  {sep}");
     println!();
 
+    // ── Confirm ─────────────────────────────────────────────────────
     match prompt::final_confirmation()? {
         Some(true) => {}
         _ => {
@@ -211,6 +247,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
         }
     }
 
+    // ── Execute ─────────────────────────────────────────────────────
     processor::run(&processor::Job {
         folder: &folder,
         media_type: media,
@@ -224,6 +261,8 @@ fn run_crunch(cli: &Cli) -> Result<()> {
     println!("\n  {} Done!\n", style("✔").green().bold());
     Ok(())
 }
+
+// ── Helpers ─────────────────────────────────────────────────────────────
 
 fn banner() {
     println!();
@@ -284,6 +323,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
     );
     println!();
 
+    // ── Folder ──────────────────────────────────────────────────────
     let folder = if let Some(ref f) = cli.folder {
         let f = if f.is_relative() {
             std::env::current_dir()?.join(f)
@@ -305,6 +345,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
         }
     };
 
+    // ── Recursive ───────────────────────────────────────────────────
     let recursive = match prompt::confirm_scan_subdirs(&cfg)? {
         Some(r) => {
             ack("Recursive", if r { "Yes" } else { "No" });
@@ -313,6 +354,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
         None => return Ok(()),
     };
 
+    // ── Delete originals ────────────────────────────────────────────
     let delete = match prompt::confirm_delete_originals(&cfg)? {
         Some(d) => {
             ack("Delete originals", if d { "Yes" } else { "No" });
@@ -321,6 +363,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
         None => return Ok(()),
     };
 
+    // ── Scan for applicable conversions ─────────────────────────────
     let all_conversions = formats::recommended_conversions();
     let applicable: Vec<(formats::MediaType, &str, &str)> = all_conversions
         .iter()
@@ -339,6 +382,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
+    // ── Summary ─────────────────────────────────────────────────────
     println!();
     let sep = style("─".repeat(50)).dim();
     println!("  {sep}");
@@ -361,6 +405,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
     println!("  {sep}");
     println!();
 
+    // ── Confirm ─────────────────────────────────────────────────────
     match prompt::final_confirmation()? {
         Some(true) => {}
         _ => {
@@ -369,6 +414,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
         }
     }
 
+    // ── Ensure dependencies ─────────────────────────────────────────
     let mut ensured: Vec<formats::MediaType> = Vec::new();
     for &(mt, _, _) in &applicable {
         if !ensured.contains(&mt) {
@@ -377,6 +423,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
         }
     }
 
+    // ── Run conversions ─────────────────────────────────────────────
     for &(media_type, input_fmt, output_fmt) in &applicable {
         println!(
             "\n  {} {} → {}",
