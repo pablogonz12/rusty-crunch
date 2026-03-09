@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] — 2026-03-10
+
+### Added
+
+- **Agent Mode [BETA]** — automated background file conversion service
+  - Configure rules: folder + input format → output format with recursive/delete options
+  - **Watch trigger** — converts files as soon as they appear (via OS file system notifications)
+  - **Periodic trigger** — scans folders at a configurable interval
+  - Runs as a **true background service** that survives terminal close
+  - PID file management for clean start/stop lifecycle
+  - Log output to `~/.config/rusty-crunch/agent.log`
+- New CLI flags: `--agent`, `--agent-stop`, `--agent-status`
+- Platform-aware BETA/ALPHA labeling (ALPHA on macOS due to limited testing)
+- Non-interactive dependency checking for headless agent mode (`deps::check()`)
+- Shared `human_bytes()` utility in `util.rs`
+
+### Fixed
+
+- Agent gracefully skips non-existent watch folders instead of crashing
+- Periodic mode enforces minimum 60-second interval
+- Clean PID file removal on early exit
+- Stale PID detection and cleanup
+
+### Changed
+
+- Agent spawns as detached background process (Unix: `setsid()`, Windows: `DETACHED_PROCESS`)
+- SIGTERM handler on Unix for clean shutdown when killed
+- Version bumped to 0.5.0
+
+### Dependencies
+
+- Added: notify 6 (file system watching), ctrlc 3 (signal handling), libc 0.2 (Unix process management)
+
 ## [0.4.0] — 2026-02-24
 
 ### Added
@@ -12,6 +45,7 @@ All notable changes to this project will be documented in this file.
   - Images: BMP/TIFF/ICO/GIF → PNG (lossless), JPEG → AVIF (lossy)
   - Documents: PDF → PDF (Optimized with 150 PPI downsampling)
 - **Display Mode Settings** — Verbose (show everything) or Clean (clear screen between interactions)
+- **GitHub Actions CI** — automated cross-platform release builds (Linux, macOS, Windows)
 - Display mode selector in Settings → Edit defaults
 
 ### Fixed
@@ -30,16 +64,20 @@ All notable changes to this project will be documented in this file.
 - Config struct serializes to JSON in `~/.config/rusty-crunch/config.json`
 - Parallel processing via rayon with CAS-based atomic compression ratio tracking
 - Progress bar with ETA, best/worst compression stats
-- Cross-platform: Windows-safe ImageMagick (`magick` not `convert`), Ghostscript (`gswin64c`), LibreOffice (`soffice` fallback)
-- UNC path prefix stripping on Windows
 
-## [0.2.0] — 2026-02-17
+### Dependencies
 
-### Added
-- GitHub Actions CI workflow for cross-platform releases
-- Improved README with installation instructions
+- Added: clap 4 (CLI parsing with derive macros)
+- Video: ffmpeg with hardware encoder probing
+- Images: ImageMagick (magick/convert)
+- Documents: Ghostscript (PDF optimization), LibreOffice (format conversion)
+- Config: serde, serde_json (JSON serialization)
+- UI: dialoguer 0.11 (interactive prompts), console 0.15 (colors/terminal control)
+- Parallel: rayon 1.10, indicatif 0.17 (progress bars)
+- Utils: walkdir 2.5 (directory traversal), dirs 5.0 (config path)
 
-## [0.1.0] — 2026-02-10
+---
 
-### Added
-- Initial release with parallel media conversion
+## [0.3.0] — Earlier
+
+(See git history for details)
