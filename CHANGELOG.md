@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] — 2026-03-12
+
+### Fixed
+
+- **Windows: VCRUNTIME140.dll not found** — Windows builds now statically link the C runtime (`+crt-static`) so the binary runs on any Windows machine without needing the Visual C++ Redistributable installed
+- **Linux: fully static binary** — switched Linux CI target from `x86_64-unknown-linux-gnu` to `x86_64-unknown-linux-musl` for a self-contained binary that works on any distro regardless of glibc version
+
 ## [0.5.1] — 2026-03-12
 
 ### Fixed
