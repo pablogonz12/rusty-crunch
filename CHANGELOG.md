@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.3] — 2026-03-12
+
+### Fixed
+
+- **Windows: program "crashes" after installing tools** — after auto-installing ffmpeg/etc via winget/choco, the program now shows a friendly success message and asks the user to restart instead of exiting with a confusing error (newly installed tools aren’t visible to the current process until the shell restarts)
+- **Clean mode screen clearing on Windows** — added `cls` fallback for cmd.exe / legacy terminals where ANSI escape codes don’t work
+- **Results disappear instantly** — after processing files, the program now pauses with "Press Enter to return to the menu" so you can actually read the results before the screen clears
+
 ## [0.5.2] — 2026-03-12
 
 ### Fixed

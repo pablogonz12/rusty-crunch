@@ -74,8 +74,14 @@ fn main() -> Result<()> {
             .interact_opt()?;
 
         match menu {
-            Some(0) => run_crunch(&cli)?,
-            Some(1) => run_recommended_crunch(&cli)?,
+            Some(0) => {
+                run_crunch(&cli)?;
+                pause_before_menu();
+            }
+            Some(1) => {
+                run_recommended_crunch(&cli)?;
+                pause_before_menu();
+            }
             Some(2) => agent::setup()?,
             Some(3) => config::edit_settings()?,
             _ => {
@@ -258,7 +264,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
         dry_run: cli.dry_run,
     })?;
 
-    println!("\n  {} Done!\n", style("✔").green().bold());
+    println!("\n  {} Done!", style("✔").green().bold());
     Ok(())
 }
 
@@ -289,8 +295,27 @@ fn ack(label: &str, value: &str) {
 
 fn maybe_clear(mode: config::DisplayMode) {
     if mode == config::DisplayMode::Clean {
-        let _ = console::Term::stdout().clear_screen();
+        // Use the console crate's clear which handles Windows and Unix.
+        // On Windows cmd.exe we also try the `cls` fallback.
+        let term = console::Term::stdout();
+        if term.clear_screen().is_err() {
+            #[cfg(target_os = "windows")]
+            {
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "cls"])
+                    .status();
+            }
+        }
     }
+}
+
+/// Pause so the user can read results before the screen clears.
+fn pause_before_menu() {
+    use std::io::{self, Write};
+    println!();
+    print!("  Press Enter to return to the menu...");
+    let _ = io::stdout().flush();
+    let _ = io::stdin().read_line(&mut String::new());
 }
 
 fn run_recommended_crunch(cli: &Cli) -> Result<()> {
@@ -443,7 +468,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
     }
 
     println!(
-        "\n  {} Recommended Crunch complete!\n",
+        "\n  {} Recommended Crunch complete!",
         style("✔").green().bold(),
     );
     Ok(())

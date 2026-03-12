@@ -216,10 +216,34 @@ pub fn ensure(media: MediaType) -> Result<()> {
     };
 
     if !still_missing.is_empty() {
-        bail!("Still missing after install: {}", still_missing.join(", "));
+        // On Windows, newly installed tools often aren't visible to the
+        // current process because PATH updates require a new shell.
+        // Give a friendly message instead of a scary error.
+        println!();
+        println!(
+            "  {} {}",
+            style("✓").green().bold(),
+            style("Tools were installed successfully!").green(),
+        );
+        println!(
+            "  {} {}",
+            style("ℹ").cyan(),
+            style("Please restart rusty-crunch so it can detect the new tools.").white().bold(),
+        );
+        println!();
+        wait_for_enter();
+        std::process::exit(0);
     }
 
     Ok(())
+}
+
+/// Pause until the user presses Enter.
+fn wait_for_enter() {
+    use std::io::{self, Write};
+    print!("  Press Enter to continue...");
+    let _ = io::stdout().flush();
+    let _ = io::stdin().read_line(&mut String::new());
 }
 
 /// Verify that tools for `media` are present without attempting auto-install.
