@@ -1,3 +1,6 @@
+use anyhow::{bail, Result};
+use console::style;
+use serde_json::Value;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
@@ -31,6 +34,127 @@ pub fn has(name: &str) -> bool {
 pub fn clear_has_cache() {
     if let Some(cache) = HAS_CACHE.get() {
         cache.lock().unwrap().clear();
+    }
+}
+
+/// Total threads to use for parallel processing, based on the configured thread mode.
+pub fn active_threads() -> usize {
+    let total = cores();
+    crate::config::load().thread_mode.to_threads(total)
+}
+
+// ── Auto-update ───────────────────────────────────────────────────────────────────────
+
+/// Check GitHub for a newer release of rusty-crunch.
+/// Returns `Ok(Some(version))` if a newer version is available,
+/// `Ok(None)` if already up-to-date, or `Err` if the check failed.
+pub fn check_for_update() -> Result<Option<String>> {
+    if !has("curl") {
+        bail!("curl is not installed — required for update checks");
+    }
+    let output = Command::new("curl")
+        .args(["-sf", "--connect-timeout", "5", "--max-time", "10",
+               "https://api.github.com/repos/pablogonz12/rusty-crunch/releases/latest"])
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| anyhow::anyhow!("curl failed: {}", e))?;
+
+    if !output.status.success() {
+        bail!("Could not reach GitHub — check your internet connection");
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(&body)
+        .map_err(|_| anyhow::anyhow!("Unexpected response from GitHub API"))?;
+    let tag = json["tag_name"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("tag_name missing from GitHub response"))?;
+    let ver = tag.trim_start_matches('v').to_string();
+    if is_newer_than_current(&ver) { Ok(Some(ver)) } else { Ok(None) }
+}
+
+fn is_newer_than_current(ver: &str) -> bool {
+    fn parse(v: &str) -> [u32; 3] {
+        let mut p = v.splitn(3, '.');
+        [
+            p.next().and_then(|x| x.parse().ok()).unwrap_or(0),
+            p.next().and_then(|x| x.parse().ok()).unwrap_or(0),
+            p.next().and_then(|x| x.parse().ok()).unwrap_or(0),
+        ]
+    }
+    parse(ver) > parse(env!("CARGO_PKG_VERSION"))
+}
+
+fn update_artifact() -> Option<&'static str> {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("rusty-crunch-linux-x86_64")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("rusty-crunch-macos-aarch64")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Some("rusty-crunch-macos-x86_64")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Some("rusty-crunch-windows-x86_64.exe")
+    } else {
+        None
+    }
+}
+
+/// Download and install the given version. Replaces the running binary and restarts.
+/// On Windows: swaps via a helper batch script.
+/// On Unix: atomic rename, then exec the new binary in-place.
+pub fn download_and_install_update(version: &str) -> Result<()> {
+    let artifact = update_artifact()
+        .ok_or_else(|| anyhow::anyhow!("Auto-update not supported on this platform"))?;
+
+    let url = format!(
+        "https://github.com/pablogonz12/rusty-crunch/releases/download/v{version}/{artifact}"
+    );
+
+    let current_exe = std::env::current_exe()?;
+    let tmp = current_exe.with_extension("update_tmp");
+
+    println!("  {} Downloading v{} \u{2026}", style("\u{2b07}").cyan(), style(version).white().bold());
+
+    let status = Command::new("curl")
+        .args(["-L", "--connect-timeout", "30", "--max-time", "300", "-#", "-o"])
+        .arg(&tmp)
+        .arg(&url)
+        .status()
+        .map_err(|_| anyhow::anyhow!("curl not found — install it to use auto-update"))?;
+
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        bail!("Download failed — check your internet connection");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let new_exe = current_exe.with_extension("new.exe");
+        std::fs::rename(&tmp, &new_exe)?;
+
+        let cur = current_exe.to_string_lossy();
+        let new = new_exe.to_string_lossy();
+        let bat = current_exe.with_extension("upd.bat");
+        std::fs::write(
+            &bat,
+            format!("@echo off\r\nping -n 3 127.0.0.1>nul\r\nmove /y \"{new}\" \"{cur}\"\r\nstart \"\" \"{cur}\"\r\ndel \"%~f0\"\r\n").as_bytes(),
+        )?;
+        Command::new("cmd")
+            .args(["/C", "start", "/min", "", bat.to_str().unwrap_or("")])
+            .spawn()?;
+        println!("\n  {} Updated to v{}. Restarting\u{2026}\n", style("\u{2714}").green().bold(), version);
+        std::process::exit(0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(&tmp, &current_exe)?;
+        println!("\n  {} Updated to v{}. Restarting\u{2026}\n", style("\u{2714}").green().bold(), version);
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        let err = Command::new(&current_exe).args(&args).exec();
+        bail!("Restart failed: {}", err);
     }
 }
 

@@ -1,4 +1,5 @@
 use crate::formats::MediaType;
+use crate::deps;
 use anyhow::Result;
 use console::style;
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
@@ -22,6 +23,39 @@ impl std::fmt::Display for DisplayMode {
         match self {
             Self::Verbose => write!(f, "Verbose"),
             Self::Clean => write!(f, "Clean"),
+        }
+    }
+}
+
+// ── Thread mode ───────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ThreadMode {
+    /// 100% of available cores.
+    #[default]
+    Full,
+    /// 50% of available cores.
+    Balanced,
+    /// 25% of available cores.
+    Saver,
+}
+
+impl std::fmt::Display for ThreadMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full     => write!(f, "Power (100% — all cores)"),
+            Self::Balanced => write!(f, "Balanced (50% of cores)"),
+            Self::Saver    => write!(f, "Power saver (25% of cores)"),
+        }
+    }
+}
+
+impl ThreadMode {
+    pub fn to_threads(self, total: usize) -> usize {
+        match self {
+            Self::Full     => total,
+            Self::Balanced => (total / 2).max(1),
+            Self::Saver    => ((total + 3) / 4).max(1),
         }
     }
 }
@@ -56,6 +90,8 @@ pub struct Config {
     #[serde(default)]
     pub display_mode: DisplayMode,
     #[serde(default)]
+    pub thread_mode: ThreadMode,
+    #[serde(default)]
     pub agent_rules: Vec<AgentRule>,
     #[serde(default)]
     pub agent_trigger: AgentTrigger,
@@ -68,6 +104,7 @@ impl Default for Config {
             default_delete_originals: false,
             default_folder: None,
             display_mode: DisplayMode::Clean,
+            thread_mode: ThreadMode::Full,
             agent_rules: Vec::new(),
             agent_trigger: AgentTrigger::default(),
         }
@@ -123,6 +160,7 @@ pub fn edit_settings() -> Result<()> {
             "📤 Export settings",
             "📥 Import settings",
             "🔄 Reset to defaults",
+            "🗑  Clean / Uninstall tools",
             "↩  Back",
         ])
         .default(0)
@@ -140,8 +178,7 @@ pub fn edit_settings() -> Result<()> {
                 style("✓").green(),
             );
             return Ok(());
-        }
-        _ => return Ok(()),
+        }        4 => return deps::clean_installed(),        _ => return Ok(()),
     }
 
     cfg.default_recursive = Confirm::with_theme(&theme())
@@ -183,6 +220,27 @@ pub fn edit_settings() -> Result<()> {
     cfg.display_mode = match mode_idx {
         1 => DisplayMode::Clean,
         _ => DisplayMode::Verbose,
+    };
+
+    let thread_items = [
+        format!("\u{26a1} {}", ThreadMode::Full),
+        format!("\u{2696}  {}", ThreadMode::Balanced),
+        format!("🌿 {}", ThreadMode::Saver),
+    ];
+    let thread_default = match cfg.thread_mode {
+        ThreadMode::Full     => 0,
+        ThreadMode::Balanced => 1,
+        ThreadMode::Saver    => 2,
+    };
+    let thread_idx = Select::with_theme(&theme())
+        .with_prompt("Thread usage")
+        .items(&thread_items)
+        .default(thread_default)
+        .interact()?;
+    cfg.thread_mode = match thread_idx {
+        1 => ThreadMode::Balanced,
+        2 => ThreadMode::Saver,
+        _ => ThreadMode::Full,
     };
 
     save(&cfg)?;
@@ -321,6 +379,7 @@ mod tests {
                 delete_originals: false,
             }],
             agent_trigger: AgentTrigger::Periodic(600),
+            thread_mode: ThreadMode::Balanced,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let cfg2: Config = serde_json::from_str(&json).unwrap();

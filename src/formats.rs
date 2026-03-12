@@ -34,7 +34,7 @@ impl MediaType {
 
     pub fn formats(self) -> &'static [&'static str] {
         match self {
-            Self::Audio => &["MP3", "WAV", "OGG", "FLAC", "AAC", "M4A", "WMA", "OPUS"],
+            Self::Audio => &["MP3", "WAV", "AIFF", "OGG", "FLAC", "AAC", "M4A", "WMA", "OPUS"],
             Self::Video => &["MP4", "MKV", "AVI", "MOV", "WEBM", "FLV", "WMV", "TS"],
             Self::Images => &["PNG", "JPEG", "BMP", "GIF", "WEBP", "TIFF", "AVIF", "ICO"],
             Self::Documents => &["PDF", "DOCX", "XLSX", "PPTX", "ODT", "ODS", "ODP", "EPUB"],
@@ -47,6 +47,7 @@ impl MediaType {
         match self {
             Self::Audio => match input {
                 "WAV"  => &["MP3", "OGG", "FLAC", "AAC", "M4A", "OPUS"],
+                "AIFF" => &["MP3", "OGG", "FLAC", "AAC", "M4A", "OPUS"],
                 "FLAC" => &["MP3", "OGG", "AAC", "M4A", "OPUS"],
                 "MP3"  => &["OGG", "AAC", "M4A", "OPUS"],
                 "OGG"  => &["MP3", "AAC", "M4A", "OPUS"],
@@ -95,7 +96,7 @@ impl MediaType {
     /// Whether a specific format is lossless for this media type.
     pub fn is_lossless(self, fmt: &str) -> bool {
         match self {
-            Self::Audio => matches!(fmt, "WAV" | "FLAC"),
+            Self::Audio => matches!(fmt, "WAV" | "AIFF" | "FLAC"),
             Self::Video => false, // all our video codecs are lossy
             Self::Images => matches!(fmt, "PNG" | "BMP" | "TIFF" | "ICO"),
             Self::Documents => fmt != "PDF (Optimized)", // 150 PPI downsample is lossy
@@ -137,6 +138,11 @@ impl MediaType {
         format!("{} {}", self.icon(), self.label())
     }
 }
+
+/// Sentinel returned by `prompt::select_input_format` when the user picks "All Lossless → FLAC".
+pub const LOSSLESS_AUDIO_SENTINEL: &str = "ALL_LOSSLESS_AUDIO";
+/// The input formats that map to the lossless-to-FLAC batch conversion.
+pub const LOSSLESS_AUDIO_INPUTS: &[&str] = &["WAV", "AIFF"];
 
 impl std::fmt::Display for MediaType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

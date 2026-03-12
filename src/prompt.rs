@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::formats::MediaType;
+use crate::formats::{self, MediaType};
 use anyhow::Result;
 use console::style;
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
@@ -38,13 +38,28 @@ pub fn select_media_type() -> Result<Option<MediaType>> {
 pub fn select_input_format(media: MediaType) -> Result<Option<&'static str>> {
     let fmts = media.formats();
 
+    // For Audio: prepend a "All Lossless → FLAC" shortcut
+    let has_lossless = media == MediaType::Audio;
+    let mut items: Vec<&str> = Vec::with_capacity(fmts.len() + 1);
+    if has_lossless {
+        items.push("★ All Lossless (WAV/AIFF \u{2192} FLAC)");
+    }
+    items.extend_from_slice(fmts);
+
     let idx = Select::with_theme(&theme())
         .with_prompt("Select the input format  (Esc to go back)")
-        .items(fmts)
-        .default(0)
+        .items(&items)
+        .default(if has_lossless { 1 } else { 0 })
         .interact_opt()?;
 
-    Ok(idx.map(|i| fmts[i]))
+    match idx {
+        None => Ok(None),
+        Some(0) if has_lossless => Ok(Some(formats::LOSSLESS_AUDIO_SENTINEL)),
+        Some(i) => {
+            let offset = if has_lossless { 1 } else { 0 };
+            Ok(Some(fmts[i - offset]))
+        }
+    }
 }
 
 pub fn select_output_format(media: MediaType, input_fmt: &str) -> Result<Option<&'static str>> {
@@ -210,4 +225,39 @@ pub fn final_confirmation() -> Result<Option<bool>> {
         .default(true)
         .interact_opt()
         .map_err(Into::into)
+}
+
+/// Ask whether the user wants to queue another file-type conversion in this run.
+pub fn confirm_add_another() -> Result<bool> {
+    Ok(Confirm::with_theme(&theme())
+        .with_prompt("Add another file type to this run?")
+        .default(false)
+        .interact()
+        .unwrap_or(false))
+}
+
+/// Ask where converted files should be placed.
+/// Returns `None` for the same folder (default), or `Some("name")` for a sub-folder.
+pub fn select_output_destination() -> Result<Option<String>> {
+    let items = [
+        "📁 Same folder (alongside originals)",
+        "📂 New sub-folder (e.g. \"compressed\")",
+    ];
+    let sel = Select::with_theme(&theme())
+        .with_prompt("Where should converted files be placed?")
+        .items(&items)
+        .default(0)
+        .interact_opt()?;
+
+    match sel {
+        None | Some(0) => Ok(None),
+        Some(_) => {
+            let name: String = Input::with_theme(&theme())
+                .with_prompt("Sub-folder name")
+                .default("compressed".to_string())
+                .interact_text()?;
+            let trimmed = name.trim().to_string();
+            if trimmed.is_empty() { Ok(None) } else { Ok(Some(trimmed)) }
+        }
+    }
 }

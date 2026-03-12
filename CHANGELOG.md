@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.4] — 2026-03-13
+
+### Added
+
+- **Multi-job workflow** — batch multiple conversion jobs in a single run. Specify input/output format, confirm each job, and all share the same folder/recursive/delete settings. Max 8 jobs per session.
+- **Output subfolder option** — choose whether converted files go to the same folder or a dedicated subfolder (e.g., `/input/output_mp3/` for MP3 conversions). Applies to both standard and recommended crunch modes.
+- **All Lossless Audio → FLAC conversion** — new special format option `★ All Lossless (WAV/AIFF → FLAC)` automatically creates two jobs: WAV→FLAC and AIFF→FLAC
+- **Thread mode selector** — choose processing threads: Power (100%), Balanced (75%), or Power Saver (50% or single-threaded). Stored in config and applied to all conversion jobs.
+- **Auto-update from GitHub** — new "🔄 Check for Updates" menu option detects newer releases and downloads the binary directly from GitHub releases page
+- **Clean/Uninstall tools** — "🗑 Clean / Uninstall tools" in Settings menu lets you selectively uninstall installed dependencies (ffmpeg, ImageMagick, Ghostscript, LibreOffice)
+- **Delete failure tracking** — conversions now report how many files failed to delete (permissions/quarantine issues) so you can manually clean them up
+- AIFF audio format support in converter (lossless, converts to MP3/OGG/FLAC/AAC/M4A/OPUS)
+
+### Fixed
+
+- **macOS: binary quarantine blocks from downloaded DMG/ZIP** — added `install.sh` script with `xattr -d` remove quarantine flag from binary
+- **macOS: delete originals fails in recommended crunch** — improved delete error handling and reporting for better visibility into quarantine/permission issues
+- **Unicode rendering in output messages** — fixed Rust unicode escape sequences in error/info messages
+
 ## [0.5.3] — 2026-03-12
 
 ### Fixed

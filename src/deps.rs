@@ -2,6 +2,7 @@ use crate::formats::MediaType;
 use crate::util;
 use anyhow::{bail, Result};
 use console::style;
+use dialoguer::{theme::ColorfulTheme, MultiSelect};
 use std::process::{Command, Stdio};
 
 /// Detect the system package manager and return (install-cmd-prefix, package-map).
@@ -271,4 +272,101 @@ pub fn check(media: MediaType) -> Result<()> {
             missing.join(", ")
         )
     }
+}
+
+// ── Uninstall / clean ───────────────────────────────────────────────────────────────────────
+
+fn uninstall_prefix(install_prefix: &str) -> String {
+    if install_prefix.contains("winget") {
+        "winget uninstall".into()
+    } else if install_prefix.contains("choco") {
+        "choco uninstall -y".into()
+    } else if install_prefix.contains("scoop") {
+        "scoop uninstall".into()
+    } else if install_prefix.contains("dnf") {
+        "sudo dnf remove -y".into()
+    } else if install_prefix.contains("apt-get") {
+        "sudo apt-get remove -y".into()
+    } else if install_prefix.contains("pacman") {
+        "sudo pacman -Rs --noconfirm".into()
+    } else if install_prefix.contains("zypper") {
+        "sudo zypper remove -y".into()
+    } else if install_prefix.contains("brew") {
+        "brew uninstall".into()
+    } else {
+        install_prefix.to_string()
+    }
+}
+
+/// Interactively uninstall managed tools (ffmpeg, ImageMagick, Ghostscript, LibreOffice).
+pub fn clean_installed() -> Result<()> {
+    println!(
+        "\n  {} {}\n",
+        style("🗑").cyan(),
+        style("Clean / Uninstall Tools").cyan().bold(),
+    );
+
+    type ToolEntry = (&'static str, bool, &'static str);
+    let tools: Vec<ToolEntry> = vec![
+        ("ffmpeg",       util::has("ffmpeg"),   "ffmpeg"),
+        ("ImageMagick",  util::has_magick(),    "magick"),
+        ("Ghostscript",  util::has_gs(),        "gs"),
+        ("LibreOffice",  util::has_lo(),        "libreoffice"),
+    ];
+
+    let installed: Vec<(&str, &str)> = tools.iter()
+        .filter(|(_, present, _)| *present)
+        .map(|(name, _, pkg)| (*name, *pkg))
+        .collect();
+
+    if installed.is_empty() {
+        println!(
+            "  {} No managed tools are currently installed.\n",
+            style("\u{2713}").green(),
+        );
+        return Ok(());
+    }
+
+    let display: Vec<String> = installed.iter()
+        .map(|(name, _)| format!("  {name}"))
+        .collect();
+
+    let selections = MultiSelect::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select tools to uninstall (Space to toggle, Enter to confirm)")
+        .items(&display)
+        .interact_opt()?;
+
+    let selections = match selections {
+        None => return Ok(()),
+        Some(s) if s.is_empty() => {
+            println!("  \u{00b7} Nothing selected.\n");
+            return Ok(());
+        }
+        Some(s) => s,
+    };
+
+    let (pm_cmd, _) = match detect_pm() {
+        Some(pm) => pm,
+        None => bail!("No supported package manager found"),
+    };
+    let uprefix = uninstall_prefix(pm_cmd);
+
+    for idx in selections {
+        let (name, pkg) = installed[idx];
+        println!(
+            "\n  {} Uninstalling {} \u{2026}",
+            style("🗑").cyan(),
+            style(name).white().bold(),
+        );
+        let full = format!("{uprefix} {pkg}");
+        if run_install(&full)? {
+            println!("  {} {} removed", style("\u{2713}").green(), style(name).white());
+        } else {
+            println!("  {} Failed to remove {}", style("\u{2717}").red(), style(name).red());
+        }
+    }
+
+    util::clear_has_cache();
+    println!();
+    Ok(())
 }

@@ -21,6 +21,10 @@ pub struct Job<'a> {
     pub recursive: bool,
     pub delete_originals: bool,
     pub dry_run: bool,
+    /// Number of rayon worker threads. Use `util::active_threads()`.
+    pub threads: usize,
+    /// If Some, converted files go into `folder/subfolder/` instead of alongside the originals.
+    pub output_subfolder: Option<&'a str>,
 }
 
 pub fn run(job: &Job) -> Result<()> {
@@ -31,6 +35,11 @@ pub fn run(job: &Job) -> Result<()> {
         other => other.to_ascii_lowercase(),
     };
     let same_ext = input_ext == output_ext;
+
+    // Create output sub-folder before any parallel work
+    if let Some(sub) = job.output_subfolder {
+        std::fs::create_dir_all(job.folder.join(sub))?;
+    }
 
     // ── Load optimization cache (for same-extension jobs like PDF → PDF) ──
     let cache = Mutex::new(if same_ext { load_opt_cache() } else { HashMap::new() });
@@ -104,18 +113,34 @@ pub fn run(job: &Job) -> Result<()> {
     );
     pb.enable_steady_tick(std::time::Duration::from_millis(80));
 
-    let ok_count = AtomicUsize::new(0);
-    let skip_count = AtomicUsize::new(0);
-    let err_count = AtomicUsize::new(0);
+    let ok_count    = AtomicUsize::new(0);
+    let skip_count  = AtomicUsize::new(0);
+    let err_count   = AtomicUsize::new(0);
+    let del_err_count = AtomicUsize::new(0);
     let saved_bytes = AtomicU64::new(0);
     // Track best/worst compression ratios
     let best_ratio = AtomicU64::new(0);     // stored as ratio * 10000 (fixed point)
     let worst_ratio = AtomicU64::new(10000); // 100% = no savings (worst possible)
     let start = Instant::now();
 
-    // ── Parallel processing via rayon ───────────────────────────────
+    // Build a local rayon thread pool limited to job.threads
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(job.threads)
+        .build()
+        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+
+    // ── Parallel processing via rayon ───────────────────────────────────────────
+    pool.install(|| {
     files.par_iter().for_each(|input_path| {
-        let output_path = input_path.with_extension(&output_ext);
+        // Compute output path (respects optional sub-folder)
+        let output_path = if let Some(sub) = job.output_subfolder {
+            job.folder
+                .join(sub)
+                .join(input_path.file_name().unwrap_or_default())
+                .with_extension(&output_ext)
+        } else {
+            input_path.with_extension(&output_ext)
+        };
 
         // Skip if output already exists (not for in-place optimization)
         if !same_ext && output_path.exists() {
@@ -178,7 +203,9 @@ pub fn run(job: &Job) -> Result<()> {
                 }
 
                 if job.delete_originals && !same_ext {
-                    let _ = std::fs::remove_file(input_path);
+                    if std::fs::remove_file(input_path).is_err() {
+                        del_err_count.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
 
                 // Record file state so we skip it on future runs
@@ -210,6 +237,7 @@ pub fn run(job: &Job) -> Result<()> {
 
         pb.inc(1);
     });
+    }); // pool.install
 
     pb.finish_and_clear();
 
@@ -223,6 +251,7 @@ pub fn run(job: &Job) -> Result<()> {
     let ok = ok_count.load(Ordering::Relaxed);
     let skipped = skip_count.load(Ordering::Relaxed);
     let errs = err_count.load(Ordering::Relaxed);
+    let del_errs = del_err_count.load(Ordering::Relaxed);
     let saved = saved_bytes.load(Ordering::Relaxed);
     let best = best_ratio.load(Ordering::Relaxed);
     let worst = worst_ratio.load(Ordering::Relaxed);
@@ -246,8 +275,14 @@ pub fn run(job: &Job) -> Result<()> {
             style("┃").dim(),
             style(util::human_bytes(saved)).cyan().bold(),
         );
-    }
-    if ok > 1 {
+    }    if del_errs > 0 {
+        println!(
+            "  {} {} original{} could not be deleted (check permissions)",
+            style("\u{2503}").dim(),
+            style(del_errs).yellow(),
+            if del_errs == 1 { "" } else { "s" },
+        );
+    }    if ok > 1 {
         println!(
             "  {} Compression   best: {:.1}%   worst: {:.1}%",
             style("┃").dim(),
