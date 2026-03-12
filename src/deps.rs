@@ -217,23 +217,35 @@ pub fn ensure(media: MediaType) -> Result<()> {
     };
 
     if !still_missing.is_empty() {
-        // On Windows, newly installed tools often aren't visible to the
-        // current process because PATH updates require a new shell.
-        // Give a friendly message instead of a scary error.
-        println!();
-        println!(
-            "  {} {}",
-            style("✓").green().bold(),
-            style("Tools were installed successfully!").green(),
-        );
-        println!(
-            "  {} {}",
-            style("ℹ").cyan(),
-            style("Please restart rusty-crunch so it can detect the new tools.").white().bold(),
-        );
-        println!();
-        wait_for_enter();
-        std::process::exit(0);
+        #[cfg(target_os = "windows")]
+        {
+            // On Windows, newly installed tools often aren't visible to the
+            // current process because PATH updates require a new shell.
+            println!();
+            println!(
+                "  {} {}",
+                style("✓").green().bold(),
+                style("Tools were installed successfully!").green(),
+            );
+            println!(
+                "  {} {}",
+                style("ℹ").cyan(),
+                style("Please restart rusty-crunch so it can detect the new tools.").white().bold(),
+            );
+            println!();
+            wait_for_enter();
+            std::process::exit(0);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // On Unix-like systems, tools should be detected immediately after install
+            let missing_str = still_missing.join(", ");
+            bail!(
+                "Failed to install required tool(s): {}. Please check your package manager logs.",
+                missing_str
+            );
+        }
     }
 
     Ok(())
@@ -298,6 +310,51 @@ fn uninstall_prefix(install_prefix: &str) -> String {
     }
 }
 
+/// Get the correct package name for a tool based on the package manager.
+/// This maps the tool key (ffmpeg, magick, gs, libreoffice) to the distro-specific package name.
+fn get_package_name(pm_prefix: &str, tool_key: &'static str) -> &'static str {
+    if pm_prefix.contains("dnf") {
+        dnf_pkg(tool_key)
+    } else if pm_prefix.contains("apt-get") {
+        apt_pkg(tool_key)
+    } else if pm_prefix.contains("pacman") {
+        pacman_pkg(tool_key)
+    } else if pm_prefix.contains("zypper") {
+        zypper_pkg(tool_key)
+    } else if pm_prefix.contains("brew") {
+        brew_pkg(tool_key)
+    } else if pm_prefix.contains("winget") {
+        #[cfg(target_os = "windows")]
+        {
+            winget_pkg(tool_key)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            tool_key
+        }
+    } else if pm_prefix.contains("choco") {
+        #[cfg(target_os = "windows")]
+        {
+            choco_pkg(tool_key)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            tool_key
+        }
+    } else if pm_prefix.contains("scoop") {
+        #[cfg(target_os = "windows")]
+        {
+            scoop_pkg(tool_key)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            tool_key
+        }
+    } else {
+        tool_key
+    }
+}
+
 /// Interactively uninstall managed tools (ffmpeg, ImageMagick, Ghostscript, LibreOffice).
 pub fn clean_installed() -> Result<()> {
     println!(
@@ -352,13 +409,14 @@ pub fn clean_installed() -> Result<()> {
     let uprefix = uninstall_prefix(pm_cmd);
 
     for idx in selections {
-        let (name, pkg) = installed[idx];
+        let (name, tool_key) = installed[idx];
+        let pkg_name = get_package_name(pm_cmd, tool_key);
         println!(
             "\n  {} Uninstalling {} \u{2026}",
             style("🗑").cyan(),
             style(name).white().bold(),
         );
-        let full = format!("{uprefix} {pkg}");
+        let full = format!("{uprefix} {pkg_name}");
         if run_install(&full)? {
             println!("  {} {} removed", style("\u{2713}").green(), style(name).white());
         } else {

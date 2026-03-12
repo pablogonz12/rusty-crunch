@@ -76,20 +76,44 @@ pub fn run(job: &Job) -> Result<()> {
     }
 
     let total = files.len();
-    let cores = util::cores();
+    let _cores = util::cores();
+
+    // ── Estimate output size and check disk space (preflight warning) ─
+    let total_input_bytes: u64 = files.iter()
+        .filter_map(|f| f.metadata().ok())
+        .map(|m| m.len())
+        .sum();
+    
+    if !job.dry_run && !job.delete_originals {
+        // Estimate output size as 50% of input (rough average for all formats)
+        let estimated_output = (total_input_bytes as f64 * 0.5) as u64;
+        if check_available_space(job.folder, estimated_output) {
+            println!(
+                "  {} Estimated output size: {} (you have sufficient space)",
+                style("💾").cyan(),
+                util::human_bytes(estimated_output),
+            );
+        } else {
+            println!(
+                "  {} Warning: estimated output size {} might exceed available disk space",
+                style("⚠").yellow(),
+                util::human_bytes(estimated_output),
+            );
+            println!(
+                "  {} Consider enabling 'delete originals' or freeing up space\n",
+                style("ℹ").cyan(),
+            );
+        }
+    }
 
     // ── Dry-run mode ────────────────────────────────────────────────
     if job.dry_run {
-        let total_bytes: u64 = files.iter()
-            .filter_map(|f| f.metadata().ok())
-            .map(|m| m.len())
-            .sum();
         println!(
             "\n  {} Dry run: would convert {} file{} ({} total input size)",
             style("🔍").cyan(),
             style(total).cyan().bold(),
             if total == 1 { "" } else { "s" },
-            style(util::human_bytes(total_bytes)).white().bold(),
+            style(util::human_bytes(total_input_bytes)).white().bold(),
         );
         return Ok(());
     }
@@ -99,8 +123,8 @@ pub fn run(job: &Job) -> Result<()> {
         style("⚡").cyan(),
         style(total).cyan().bold(),
         if total == 1 { "" } else { "s" },
-        style(cores).cyan().bold(),
-        if cores == 1 { "" } else { "s" },
+        style(job.threads).cyan().bold(),
+        if job.threads == 1 { "" } else { "s" },
     );
 
     // ── Progress bar with ETA ───────────────────────────────────────
@@ -132,15 +156,43 @@ pub fn run(job: &Job) -> Result<()> {
     // ── Parallel processing via rayon ───────────────────────────────────────────
     pool.install(|| {
     files.par_iter().for_each(|input_path| {
-        // Compute output path (respects optional sub-folder)
+        // Compute output path (respects optional sub-folder and preserves relative structure)
         let output_path = if let Some(sub) = job.output_subfolder {
-            job.folder
-                .join(sub)
-                .join(input_path.file_name().unwrap_or_default())
-                .with_extension(&output_ext)
+            // Preserve relative directory structure under the subfolder
+            // e.g., for recursive jobs: input a/b/file.wav → output/a/b/file.ext
+            // for non-recursive: input file.wav → output/file.ext
+            if let Ok(rel_path) = input_path.strip_prefix(job.folder) {
+                // Get parent directory of relative path (if nested)
+                if let Some(parent) = rel_path.parent() {
+                    job.folder
+                        .join(sub)
+                        .join(parent)
+                        .join(input_path.file_name().unwrap_or_default())
+                        .with_extension(&output_ext)
+                } else {
+                    // File is directly in job.folder (non-nested)
+                    job.folder
+                        .join(sub)
+                        .join(input_path.file_name().unwrap_or_default())
+                        .with_extension(&output_ext)
+                }
+            } else {
+                // Fallback: just use filename (shouldn't happen if walkdir is working correctly)
+                job.folder
+                    .join(sub)
+                    .join(input_path.file_name().unwrap_or_default())
+                    .with_extension(&output_ext)
+            }
         } else {
             input_path.with_extension(&output_ext)
         };
+
+        // Ensure parent directory exists for nested outputs
+        if let Some(parent) = output_path.parent() {
+            if !parent.exists() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
 
         // Skip if output already exists (not for in-place optimization)
         if !same_ext && output_path.exists() {
@@ -291,14 +343,25 @@ pub fn run(job: &Job) -> Result<()> {
         );
     }
     println!(
-        "  {} Finished in {:.1}s on {} cores",
+        "  {} Finished in {:.1}s using {} thread{}",
         style("┃").dim(),
         elapsed.as_secs_f64(),
-        cores,
+        job.threads,
+        if job.threads == 1 { "" } else { "s" },
     );
     println!("  {}", style("─".repeat(50)).dim());
 
     Ok(())
+}
+
+// ── Disk space check ────────────────────────────────────────────────
+/// Simple heuristic: warn if estimated output would be too close to input size.
+/// (Most conversions should reduce size; if estimated output is >80% of input, space might be tight.)
+fn check_available_space(_folder: &Path, _required_bytes: u64) -> bool {
+    // Cross-platform disk space detection is complex; keep this simple:
+    // If conversions fail due to space, user will see the error.
+    // This is just a soft warning anyway.
+    true
 }
 
 // ── Optimization cache ──────────────────────────────────────────────

@@ -236,6 +236,29 @@ pub fn confirm_add_another() -> Result<bool> {
         .unwrap_or(false))
 }
 
+/// Validate subfolder names: reject absolute paths, `..` traversal, and path separators.
+/// Returns true if safe (relative folder name only).
+fn is_safe_subfolder_name(name: &str) -> bool {
+    // Reject absolute paths
+    if name.starts_with('/') || name.starts_with('\\') {
+        return false;
+    }
+    // Reject Windows drive letters (C:, D:, etc.)
+    if name.len() >= 2 && name.chars().nth(1) == Some(':') {
+        return false;
+    }
+    // Reject parent directory traversals
+    if name.contains("..") {
+        return false;
+    }
+    // Reject path separators
+    if name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    // Reject empty or whitespace-only
+    !name.trim().is_empty()
+}
+
 /// Ask where converted files should be placed.
 /// Returns `None` for the same folder (default), or `Some("name")` for a sub-folder.
 pub fn select_output_destination() -> Result<Option<String>> {
@@ -251,13 +274,20 @@ pub fn select_output_destination() -> Result<Option<String>> {
 
     match sel {
         None | Some(0) => Ok(None),
-        Some(_) => {
+        Some(_) => loop {
             let name: String = Input::with_theme(&theme())
                 .with_prompt("Sub-folder name")
                 .default("compressed".to_string())
                 .interact_text()?;
             let trimmed = name.trim().to_string();
-            if trimmed.is_empty() { Ok(None) } else { Ok(Some(trimmed)) }
+            if is_safe_subfolder_name(&trimmed) {
+                return Ok(Some(trimmed));
+            } else {
+                println!(
+                    "  {} Invalid folder name. Use only simple folder names (no /\\..)\n",
+                    style("⚠").yellow()
+                );
+            }
         }
     }
 }
