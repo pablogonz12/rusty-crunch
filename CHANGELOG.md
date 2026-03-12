@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] — 2026-03-12
+
+### Fixed
+
+- **PDF re-optimization skip** — same-extension optimizations (PDF → PDF) now cache file metadata (size + mtime) in `~/.config/rusty-crunch/opt_cache.json` so already-optimized files are instantly skipped on repeat runs
+- Added 2 new unit tests for the optimization cache (`cache_entry_matches_unchanged_file`, `cache_roundtrip_serialize`)
+
 ## [0.5.0] — 2026-03-10
 
 ### Added
