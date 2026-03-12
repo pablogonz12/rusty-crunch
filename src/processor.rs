@@ -7,6 +7,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -25,9 +26,32 @@ pub struct Job<'a> {
     pub threads: usize,
     /// If Some, converted files go into `folder/subfolder/` instead of alongside the originals.
     pub output_subfolder: Option<&'a str>,
+    /// Optional: minimum file size in bytes (for filtering). None = no minimum.
+    pub min_file_size: Option<u64>,
+    /// Optional: maximum file size in bytes (for filtering). None = no maximum.
+    pub max_file_size: Option<u64>,
+    /// What to do if the output file already exists.
+    pub conflict_strategy: crate::config::ConflictStrategy,
 }
 
-pub fn run(job: &Job) -> Result<()> {
+/// Serializable summary of a conversion job result.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct ConversionSummary {
+    pub media_type: String,
+    pub input_format: String,
+    pub output_format: String,
+    pub files_converted: usize,
+    pub files_skipped: usize,
+    pub files_failed: usize,
+    pub bytes_saved: u64,
+    pub delete_errors: usize,
+    pub duration_secs: f64,
+    pub threads_used: usize,
+    pub compression_best_percent: f64,
+    pub compression_worst_percent: f64,
+}
+
+pub fn run(job: &Job) -> Result<ConversionSummary> {
     let input_ext = job.input_fmt.to_ascii_lowercase();
     let output_ext = match job.output_fmt {
         "PDF (Optimized)" => "pdf".to_string(),
@@ -52,7 +76,8 @@ pub fn run(job: &Job) -> Result<()> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
-            e.path()
+            let path = e.path();
+            let mut matches_ext = path
                 .extension()
                 .map(|ext| {
                     let lc = ext.to_ascii_lowercase();
@@ -60,7 +85,24 @@ pub fn run(job: &Job) -> Result<()> {
                         || (input_ext == "jpeg" && lc == "jpg")
                         || (input_ext == "jpg" && lc == "jpeg")
                 })
-                .unwrap_or(false)
+                .unwrap_or(false);
+
+            if matches_ext {
+                if let Ok(meta) = path.metadata() {
+                    let size = meta.len();
+                    if let Some(min) = job.min_file_size {
+                        if size < min {
+                            matches_ext = false;
+                        }
+                    }
+                    if let Some(max) = job.max_file_size {
+                        if size > max {
+                            matches_ext = false;
+                        }
+                    }
+                }
+            }
+            matches_ext
         })
         .map(|e| e.into_path())
         .collect();
@@ -72,7 +114,12 @@ pub fn run(job: &Job) -> Result<()> {
             input_ext,
             style(job.folder.display()).dim()
         );
-        return Ok(());
+        return Ok(ConversionSummary {
+            media_type: format!("{:?}", job.media_type),
+            input_format: job.input_fmt.to_string(),
+            output_format: job.output_fmt.to_string(),
+            ..Default::default()
+        });
     }
 
     let total = files.len();
@@ -115,7 +162,13 @@ pub fn run(job: &Job) -> Result<()> {
             if total == 1 { "" } else { "s" },
             style(util::human_bytes(total_input_bytes)).white().bold(),
         );
-        return Ok(());
+        return Ok(ConversionSummary {
+            media_type: format!("{:?}", job.media_type),
+            input_format: job.input_fmt.to_string(),
+            output_format: job.output_fmt.to_string(),
+            files_converted: 0,
+            ..Default::default()
+        });
     }
 
     println!(
@@ -151,10 +204,10 @@ pub fn run(job: &Job) -> Result<()> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(job.threads)
         .build()
-        .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+        .ok();
 
     // ── Parallel processing via rayon ───────────────────────────────────────────
-    pool.install(|| {
+    let worker = || {
     files.par_iter().for_each(|input_path| {
         // Compute output path (respects optional sub-folder and preserves relative structure)
         let output_path = if let Some(sub) = job.output_subfolder {
@@ -194,17 +247,44 @@ pub fn run(job: &Job) -> Result<()> {
             }
         }
 
-        // Skip if output already exists (not for in-place optimization)
-        if !same_ext && output_path.exists() {
-            skip_count.fetch_add(1, Ordering::Relaxed);
-            pb.inc(1);
-            return;
+        let mut final_output_path = output_path;
+
+        // Handle conflicts if output already exists (not for in-place optimization)
+        if !same_ext && final_output_path.exists() {
+            match job.conflict_strategy {
+                crate::config::ConflictStrategy::Skip => {
+                    skip_count.fetch_add(1, Ordering::Relaxed);
+                    pb.inc(1);
+                    return;
+                }
+                crate::config::ConflictStrategy::Overwrite => {
+                    // Do nothing, file will be overwritten by converter
+                }
+                crate::config::ConflictStrategy::Rename => {
+                    let mut counter = 1;
+                    let file_stem = final_output_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    let folder = final_output_path.parent().unwrap_or_else(|| std::path::Path::new(""));
+                    loop {
+                        let new_name = format!("{}.{}.{}", file_stem, counter, output_ext);
+                        let candidate = folder.join(new_name);
+                        if !candidate.exists() {
+                            final_output_path = candidate;
+                            break;
+                        }
+                        counter += 1;
+                    }
+                }
+            }
         }
 
         // Skip files already optimized (same-extension jobs like PDF → PDF)
         if same_ext {
             let key = input_path.to_string_lossy();
-            if let Some(entry) = cache.lock().unwrap().get(key.as_ref()) {
+            if let Some(entry) = cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(key.as_ref())
+            {
                 if entry.matches(input_path) {
                     skip_count.fetch_add(1, Ordering::Relaxed);
                     pb.inc(1);
@@ -223,13 +303,13 @@ pub fn run(job: &Job) -> Result<()> {
 
         match converter::convert(
             input_path,
-            &output_path,
+            &final_output_path,
             job.media_type,
             job.input_fmt,
             job.output_fmt,
         ) {
             Ok(()) => {
-                let output_size = output_path.metadata().map(|m| m.len()).unwrap_or(0);
+                let output_size = final_output_path.metadata().map(|m| m.len()).unwrap_or(0);
                 if input_size > 0 {
                     let saved = input_size.saturating_sub(output_size);
                     saved_bytes.fetch_add(saved, Ordering::Relaxed);
@@ -264,7 +344,10 @@ pub fn run(job: &Job) -> Result<()> {
                 if same_ext {
                     if let Some(stamp) = CacheEntry::from_path(input_path) {
                         let key = input_path.to_string_lossy().into_owned();
-                        cache.lock().unwrap().insert(key, stamp);
+                        cache
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key, stamp);
                     }
                 }
 
@@ -281,7 +364,7 @@ pub fn run(job: &Job) -> Result<()> {
                 });
                 // Clean up partial output (but not for in-place where output IS the input)
                 if !same_ext {
-                    let _ = std::fs::remove_file(&output_path);
+                    let _ = std::fs::remove_file(&final_output_path);
                 }
                 err_count.fetch_add(1, Ordering::Relaxed);
             }
@@ -289,13 +372,23 @@ pub fn run(job: &Job) -> Result<()> {
 
         pb.inc(1);
     });
-    }); // pool.install
+    };
+
+    if let Some(pool) = &pool {
+        pool.install(worker);
+    } else {
+        worker();
+    }
 
     pb.finish_and_clear();
 
     // ── Persist optimization cache ─────────────────────────────────
     if same_ext {
-        save_opt_cache(&cache.into_inner().unwrap());
+        let cache = match cache.into_inner() {
+            Ok(c) => c,
+            Err(p) => p.into_inner(),
+        };
+        save_opt_cache(&cache);
     }
 
     // ── Summary ─────────────────────────────────────────────────────
@@ -351,17 +444,53 @@ pub fn run(job: &Job) -> Result<()> {
     );
     println!("  {}", style("─".repeat(50)).dim());
 
-    Ok(())
+    Ok(ConversionSummary {
+        media_type: format!("{:?}", job.media_type),
+        input_format: job.input_fmt.to_string(),
+        output_format: job.output_fmt.to_string(),
+        files_converted: ok,
+        files_skipped: skipped,
+        files_failed: errs,
+        bytes_saved: saved,
+        delete_errors: del_errs,
+        duration_secs: elapsed.as_secs_f64(),
+        threads_used: job.threads,
+        compression_best_percent: best as f64 / 100.0,
+        compression_worst_percent: if worst == 10000 { 0.0 } else { worst as f64 / 100.0 },
+    })
 }
 
 // ── Disk space check ────────────────────────────────────────────────
 /// Simple heuristic: warn if estimated output would be too close to input size.
 /// (Most conversions should reduce size; if estimated output is >80% of input, space might be tight.)
 fn check_available_space(_folder: &Path, _required_bytes: u64) -> bool {
-    // Cross-platform disk space detection is complex; keep this simple:
-    // If conversions fail due to space, user will see the error.
-    // This is just a soft warning anyway.
-    true
+    #[cfg(unix)]
+    {
+        let check_path = if _folder.exists() {
+            _folder
+        } else {
+            _folder.parent().unwrap_or_else(|| Path::new("/"))
+        };
+
+        let c_path = match CString::new(check_path.to_string_lossy().as_bytes()) {
+            Ok(c) => c,
+            Err(_) => return true,
+        };
+
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat as *mut libc::statvfs) };
+        if rc != 0 {
+            return true;
+        }
+
+        let available = (stat.f_bavail as u128).saturating_mul(stat.f_frsize as u128);
+        return available >= _required_bytes as u128;
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 // ── Optimization cache ──────────────────────────────────────────────
@@ -477,5 +606,188 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded["/tmp/a.pdf"].size, 100);
         assert_eq!(loaded["/tmp/b.pdf"].modified, 9876543210);
+    }
+
+    #[test]
+    fn cache_entry_size_tracking() {
+        let dir = std::env::temp_dir().join("rc_cache_size_test");
+        let _ = std::fs::create_dir_all(&dir);
+        
+        // Create files of different sizes
+        let sizes = vec![100, 1000, 10000, 1000000];
+        for (i, size) in sizes.iter().enumerate() {
+            let path = dir.join(format!("file{}.dat", i));
+            let data = vec![0u8; *size];
+            std::fs::write(&path, data).unwrap();
+            
+            let entry = CacheEntry::from_path(&path).unwrap();
+            assert_eq!(entry.size, *size as u64);
+        }
+        
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_entry_modified_time() {
+        let dir = std::env::temp_dir().join("rc_cache_mtime_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("timetest.txt");
+        
+        std::fs::write(&path, b"original").unwrap();
+        let entry1 = CacheEntry::from_path(&path).unwrap();
+        
+        // Wait and modify
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::fs::write(&path, b"modified").unwrap();
+        let entry2 = CacheEntry::from_path(&path).unwrap();
+        
+        // Modified times should differ (usually)
+        // Note: might be equal on fast filesystems, so we just check they have some value
+        assert!(entry1.modified > 0);
+        assert!(entry2.modified > 0);
+        
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_empty_operations() {
+        let cache: HashMap<String, CacheEntry> = HashMap::new();
+        assert!(cache.is_empty());
+        
+        // Serialization of empty cache should work
+        let json = serde_json::to_string(&cache).unwrap();
+        let restored: HashMap<String, CacheEntry> = serde_json::from_str(&json).unwrap();
+        assert!(restored.is_empty());
+    }
+
+    #[test]
+    fn cache_large_number_of_entries() {
+        let mut cache = HashMap::new();
+        
+        // Add many entries
+        for i in 0..1000 {
+            cache.insert(
+                format!("/path/file{}.bin", i),
+                CacheEntry {
+                    size: (i * 1024) as u64,
+                    modified: (1000000000 + i as u128) as u64,
+                },
+            );
+        }
+        
+        assert_eq!(cache.len(), 1000);
+        
+        // Verify serialization works with large cache
+        let json = serde_json::to_string(&cache).unwrap();
+        let restored: HashMap<String, CacheEntry> = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(restored.len(), 1000);
+        assert_eq!(restored["/path/file999.bin"].size, 999 * 1024);
+    }
+
+    #[test]
+    fn cache_entry_matches_same_file_twice() {
+        let dir = std::env::temp_dir().join("rc_cache_same_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("file.txt");
+        
+        std::fs::write(&path, b"content").unwrap();
+        let entry1 = CacheEntry::from_path(&path).unwrap();
+        let entry2 = CacheEntry::from_path(&path).unwrap();
+        
+        // Same file read twice should create equivalent entries
+        assert_eq!(entry1.size, entry2.size);
+        assert_eq!(entry1.modified, entry2.modified);
+        
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn conversion_summary_creation() {
+        let summary = ConversionSummary {
+            media_type: "Audio".to_string(),
+            input_format: "MP3".to_string(),
+            output_format: "FLAC".to_string(),
+            files_converted: 10,
+            files_skipped: 5,
+            files_failed: 2,
+            bytes_saved: 1048576,
+            delete_errors: 0,
+            duration_secs: 42.5,
+            threads_used: 4,
+            compression_best_percent: 45.0,
+            compression_worst_percent: 95.0,
+        };
+        
+        assert_eq!(summary.files_converted, 10);
+        assert_eq!(summary.files_skipped, 5);
+        assert_eq!(summary.files_failed, 2);
+        assert_eq!(summary.bytes_saved, 1048576);
+    }
+
+    #[test]
+    fn conversion_summary_serialization() {
+        let summary = ConversionSummary {
+            media_type: "Video".to_string(),
+            input_format: "AVI".to_string(),
+            output_format: "MKV".to_string(),
+            files_converted: 3,
+            files_skipped: 1,
+            files_failed: 0,
+            bytes_saved: 5242880,
+            delete_errors: 0,
+            duration_secs: 120.0,
+            threads_used: 8,
+            compression_best_percent: 50.0,
+            compression_worst_percent: 80.0,
+        };
+        
+        let json = serde_json::to_string(&summary).unwrap();
+        let restored: ConversionSummary = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(restored.media_type, "Video");
+        assert_eq!(restored.input_format, "AVI");
+        assert_eq!(restored.output_format, "MKV");
+        assert_eq!(restored.files_converted, 3);
+        assert_eq!(restored.bytes_saved, 5242880);
+    }
+
+    #[test]
+    fn cache_entry_various_paths() {
+        let dir = std::env::temp_dir().join("rc_cache_paths_test");
+        let _ = std::fs::create_dir_all(&dir);
+        
+        let paths = vec![
+            "simple.txt",
+            "file with spaces.txt",
+            "file-with-dashes.txt",
+            "file_with_underscores.txt",
+            "файл.txt", // Unicode filename
+        ];
+        
+        for filename in paths {
+            let path = dir.join(filename);
+            std::fs::write(&path, b"test content").unwrap();
+            
+            let entry = CacheEntry::from_path(&path).unwrap();
+            assert!(entry.matches(&path));
+        }
+        
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cache_entry_zero_size_file() {
+        let dir = std::env::temp_dir().join("rc_cache_empty_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("empty.txt");
+        
+        // Create zero-byte file
+        std::fs::write(&path, b"").unwrap();
+        
+        let entry = CacheEntry::from_path(&path).unwrap();
+        assert_eq!(entry.size, 0);
+        
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

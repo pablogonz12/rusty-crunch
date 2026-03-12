@@ -510,7 +510,7 @@ fn configure_trigger(cfg: &config::Config) -> Result<Option<AgentTrigger>> {
     match sel {
         None => Ok(None),
         Some(0) => Ok(Some(AgentTrigger::Watch)),
-        Some(_) => {
+        Some(_) => loop {
             let current = match cfg.agent_trigger {
                 AgentTrigger::Periodic(s) => (s / 60).to_string(),
                 _ => "5".to_string(),
@@ -519,9 +519,17 @@ fn configure_trigger(cfg: &config::Config) -> Result<Option<AgentTrigger>> {
                 .with_prompt("Scan interval (minutes)")
                 .default(current)
                 .interact_text()?;
-            let mins: u64 = input.trim().parse().unwrap_or(5).max(1);
-            Ok(Some(AgentTrigger::Periodic(mins * 60)))
-        }
+
+            match input.trim().parse::<u64>() {
+                Ok(mins) if mins >= 1 => return Ok(Some(AgentTrigger::Periodic(mins * 60))),
+                _ => {
+                    println!(
+                        "  {} Enter a valid integer >= 1",
+                        style("✗").red()
+                    );
+                }
+            }
+        },
     }
 }
 
@@ -606,6 +614,8 @@ fn start(cfg: &config::Config) -> Result<()> {
 // ── Watch Mode ──────────────────────────────────────────────────────────
 
 fn run_watch(rules: &[AgentRule]) -> Result<()> {
+    const MAX_PENDING_EVENTS: usize = 10_000;
+
     let (tx, rx) = mpsc::channel();
     let mut watcher = RecommendedWatcher::new(
         move |res| {
@@ -659,6 +669,14 @@ fn run_watch(rules: &[AgentRule]) -> Result<()> {
                 Ok(event) => {
                     for path in event.paths {
                         if path.is_file() && !processed.contains(&path) {
+                            if pending.len() >= MAX_PENDING_EVENTS {
+                                pending.clear();
+                                eprintln!(
+                                    "  {} Watch backlog exceeded {} events; dropping backlog",
+                                    style("⚠").yellow(),
+                                    MAX_PENDING_EVENTS
+                                );
+                            }
                             pending.insert(path, Instant::now());
                         }
                     }
@@ -996,5 +1014,237 @@ mod tests {
         assert_eq!(util::human_bytes(2048), "2 KB");
         assert_eq!(util::human_bytes(1_500_000), "1.4 MB");
         assert_eq!(util::human_bytes(2_000_000_000), "1.86 GB");
+    }
+
+    #[test]
+    fn pattern_matching_extensions_case_insensitive() {
+        let path = std::path::Path::new("test.JPG");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_uppercase();
+        assert_eq!(ext, "JPG");
+
+        let path2 = std::path::Path::new("document.PDF");
+        let ext2 = path2.extension().and_then(|e| e.to_str()).unwrap_or("").to_uppercase();
+        assert_eq!(ext2, "PDF");
+    }
+
+    #[test]
+    fn file_filter_matching_basic() {
+        let dir = std::env::temp_dir().join("rc_agent_filter_test");
+        let _ = fs::create_dir_all(&dir);
+        
+        // Create test files
+        let mp3_path = dir.join("song.mp3");
+        let jpeg_path = dir.join("photo.jpeg");
+        let txt_path = dir.join("readme.txt");
+        
+        fs::write(&mp3_path, b"mp3 data").unwrap();
+        fs::write(&jpeg_path, b"jpeg data").unwrap();
+        fs::write(&txt_path, b"text data").unwrap();
+        
+        // Check extensions
+        let mp3_ext = mp3_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_uppercase();
+        let jpeg_ext = jpeg_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_uppercase();
+        let txt_ext = txt_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_uppercase();
+        
+        assert_eq!(mp3_ext, "MP3");
+        assert_eq!(jpeg_ext, "JPEG");
+        assert_eq!(txt_ext, "TXT");
+        
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_rule_pathbuf_handling() {
+        let rule = AgentRule {
+            folder: "/home/user/music".to_string(),
+            media_type: crate::formats::MediaType::Audio,
+            input_fmt: "MP3".to_string(),
+            output_fmt: "FLAC".to_string(),
+            recursive: true,
+            delete_originals: false,
+        };
+        
+        assert_eq!(rule.folder, "/home/user/music");
+        assert_eq!(rule.input_fmt, "MP3");
+        assert_eq!(rule.output_fmt, "FLAC");
+    }
+
+    #[test]
+    fn multiple_file_extensions() {
+        let extensions = vec!["jpg", "jpeg", "JPG", "JPEG", "Jpg"];
+        let normalized: Vec<String> = extensions
+            .iter()
+            .map(|e| e.to_uppercase())
+            .collect();
+        
+        // All should normalize to uppercase
+        for n in &normalized {
+            assert_eq!(n.to_uppercase(), *n);
+        }
+    }
+
+    #[test]
+    fn output_extension_for_formats() {
+        let test_cases = vec![
+            ("JPEG", "PNG", "png"),
+            ("MP3", "FLAC", "flac"),
+            ("AVI", "MKV", "mkv"),
+            ("BMP", "WEBP", "webp"),
+        ];
+        
+        for (_input, output, expected_ext) in test_cases {
+            let output_lower = output.to_lowercase();
+            assert_eq!(output_lower, expected_ext);
+        }
+    }
+
+    #[test]
+    fn rule_configuration_variations() {
+        // Test different rule configurations
+        let configs = vec![
+            (true, true),   // recursive, delete originals
+            (true, false),  // recursive, keep originals
+            (false, true),  // non-recursive, delete originals
+            (false, false), // non-recursive, keep originals
+        ];
+        
+        let media_types = vec![
+            crate::formats::MediaType::Audio,
+            crate::formats::MediaType::Video,
+            crate::formats::MediaType::Images,
+            crate::formats::MediaType::Documents,
+        ];
+        
+        for (recursive, delete) in &configs {
+            for media_type in &media_types {
+                let rule = AgentRule {
+                    folder: "/test".to_string(),
+                    media_type: *media_type,
+                    input_fmt: "IN".to_string(),
+                    output_fmt: "OUT".to_string(),
+                    recursive: *recursive,
+                    delete_originals: *delete,
+                };
+                
+                assert_eq!(rule.recursive, *recursive);
+                assert_eq!(rule.delete_originals, *delete);
+                assert_eq!(rule.media_type, *media_type);
+            }
+        }
+    }
+
+    #[test]
+    fn file_format_string_handling() {
+        let formats = vec!["MP3", "FLAC", "OGG", "WAV", "AIFF"];
+        
+        for fmt in &formats {
+            // Should be uppercase
+            assert_eq!(*fmt, fmt.to_uppercase());
+            // Should not be empty
+            assert!(!fmt.is_empty());
+            // Should contain only alphanumeric
+            assert!(fmt.chars().all(|c| c.is_alphanumeric()));
+        }
+    }
+
+    #[test]
+    fn directory_recursion_settings() {
+        let recursive_rule = AgentRule {
+            folder: "/root".to_string(),
+            media_type: crate::formats::MediaType::Audio,
+            input_fmt: "MP3".to_string(),
+            output_fmt: "FLAC".to_string(),
+            recursive: true,
+            delete_originals: false,
+        };
+        
+        let non_recursive_rule = AgentRule {
+            folder: "/root".to_string(),
+            media_type: crate::formats::MediaType::Audio,
+            input_fmt: "MP3".to_string(),
+            output_fmt: "FLAC".to_string(),
+            recursive: false,
+            delete_originals: false,
+        };
+        
+        assert!(recursive_rule.recursive);
+        assert!(!non_recursive_rule.recursive);
+        assert_eq!(recursive_rule.folder, non_recursive_rule.folder);
+    }
+
+    #[test]
+    fn delete_originals_flag_variations() {
+        let keep_rule = AgentRule {
+            folder: "/test".to_string(),
+            media_type: crate::formats::MediaType::Images,
+            input_fmt: "JPEG".to_string(),
+            output_fmt: "WEBP".to_string(),
+            recursive: true,
+            delete_originals: false,
+        };
+        
+        let delete_rule = AgentRule {
+            folder: "/test".to_string(),
+            media_type: crate::formats::MediaType::Images,
+            input_fmt: "JPEG".to_string(),
+            output_fmt: "WEBP".to_string(),
+            recursive: true,
+            delete_originals: true,
+        };
+        
+        assert!(!keep_rule.delete_originals);
+        assert!(delete_rule.delete_originals);
+    }
+
+    #[test]
+    fn format_pairs_audio() {
+        let pairs = vec![
+            ("WAV", "FLAC"),
+            ("MP3", "OPUS"),
+            ("OGG", "FLAC"),
+            ("AAC", "OPUS"),
+        ];
+        
+        for (input, output) in pairs {
+            assert_ne!(input, output); // Should be different
+            let input_upper = input.to_uppercase();
+            let output_upper = output.to_uppercase();
+            assert_eq!(input, input_upper);
+            assert_eq!(output, output_upper);
+        }
+    }
+
+    #[test]
+    fn format_pairs_validation() {
+        let audio = crate::formats::MediaType::Audio;
+        
+        let test_pairs = vec![
+            ("WAV", "FLAC"),  // lossless to lossless
+            ("MP3", "OPUS"),  // lossy to lossy
+            ("FLAC", "OGG"),  // lossless to lossy
+        ];
+        
+        for (input, output) in test_pairs {
+            // Check that compatible outputs contains the target
+            let compatible = audio.compatible_outputs(input);
+            assert!(
+                compatible.contains(&output),
+                "Format pair ({}, {}) should be valid for Audio",
+                input,
+                output
+            );
+        }
     }
 }

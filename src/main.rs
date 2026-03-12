@@ -32,9 +32,25 @@ struct Cli {
     #[arg(long)]
     agent_status: bool,
 
+    /// Check that all required tools are installed
+    #[arg(long)]
+    health_check: bool,
+
+    /// Minimum file size (e.g., "10MB", "1GB"). Only process files larger than this.
+    #[arg(long, value_name = "SIZE")]
+    min_size: Option<String>,
+
+    /// Maximum file size (e.g., "500MB", "2GB"). Only process files smaller than this.
+    #[arg(long, value_name = "SIZE")]
+    max_size: Option<String>,
+
     /// Folder to process (skips the directory browser)
     #[arg(value_name = "FOLDER")]
     folder: Option<PathBuf>,
+
+    /// Print conversion summary as JSON to stdout
+    #[arg(long)]
+    json: bool,
 }
 
 fn main() -> Result<()> {
@@ -48,6 +64,9 @@ fn main() -> Result<()> {
     }
     if cli.agent_status {
         return agent::show_status();
+    }
+    if cli.health_check {
+        return run_health_check();
     }
 
     loop {
@@ -98,6 +117,17 @@ fn main() -> Result<()> {
 fn run_crunch(cli: &Cli) -> Result<()> {
     let cfg = config::load();
 
+    // Parse size filters
+    let min_size = cli.min_size.as_deref().and_then(util::parse_size);
+    let max_size = cli.max_size.as_deref().and_then(util::parse_size);
+
+    if cli.min_size.is_some() && min_size.is_none() {
+        anyhow::bail!("Invalid --min-size format. Use: 10MB, 1GB, 512KB, etc.");
+    }
+    if cli.max_size.is_some() && max_size.is_none() {
+        anyhow::bail!("Invalid --max-size format. Use: 500MB, 2GB, 100MB, etc.");
+    }
+    
     // ── Shared settings (asked once for all jobs) ───────────────────
     let folder = if let Some(ref f) = cli.folder {
         let f = if f.is_relative() { std::env::current_dir()?.join(f) } else { f.clone() };
@@ -216,6 +246,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
     let threads = util::active_threads();
 
     // ── Run all jobs ─────────────────────────────────────────────────
+    let mut summaries = Vec::new();
     for s in &specs {
         if specs.len() > 1 {
             println!(
@@ -226,7 +257,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
                 style(s.output_fmt).green().bold(),
             );
         }
-        processor::run(&processor::Job {
+        let summary = processor::run(&processor::Job {
             folder: &folder,
             media_type: s.media,
             input_fmt: s.input_fmt,
@@ -236,7 +267,17 @@ fn run_crunch(cli: &Cli) -> Result<()> {
             dry_run: cli.dry_run,
             threads,
             output_subfolder: subfolder.as_deref(),
+            min_file_size: min_size,
+            max_file_size: max_size,
+            conflict_strategy: cfg.conflict_strategy,
         })?;
+        summaries.push(summary);
+    }
+
+    if cli.json {
+        if let Ok(j) = serde_json::to_string_pretty(&summaries) {
+            println!("{}", j);
+        }
     }
 
     println!("\n  {} Done!", style("✔").green().bold());
@@ -430,6 +471,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
 
     // ── Run conversions ─────────────────────────────────────────────
     let threads = util::active_threads();
+    let mut summaries = Vec::new();
     for &(media_type, input_fmt, output_fmt) in &applicable {
         println!(
             "\n  {} {} → {}",
@@ -437,7 +479,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
             style(input_fmt).white().bold(),
             style(output_fmt).green().bold(),
         );
-        processor::run(&processor::Job {
+        let summary = processor::run(&processor::Job {
             folder: &folder,
             media_type,
             input_fmt,
@@ -447,7 +489,17 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
             dry_run: cli.dry_run,
             threads,
             output_subfolder: subfolder.as_deref(),
+            min_file_size: None,
+            max_file_size: None,
+            conflict_strategy: cfg.conflict_strategy,
         })?;
+        summaries.push(summary);
+    }
+
+    if cli.json {
+        if let Ok(j) = serde_json::to_string_pretty(&summaries) {
+            println!("{}", j);
+        }
     }
 
     println!(
@@ -495,5 +547,52 @@ fn check_for_updates() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn run_health_check() -> Result<()> {
+    println!("\n  {} {}\n", style("🔍").cyan(), style("System Health Check").cyan().bold());
+
+    let mut issues = Vec::new();
+
+    // Check ffmpeg (used by audio/video)
+    if !util::has("ffmpeg") {
+        issues.push(("ffmpeg", "Audio/Video conversion"));
+    }
+
+    // Check ImageMagick (used by images)
+    if !util::has_magick() {
+        issues.push(("ImageMagick (magick)", "Image conversion"));
+    }
+
+    // Check Ghostscript (used by PDF)
+    if !util::has_gs() {
+        issues.push(("Ghostscript (gs)", "PDF optimization"));
+    }
+
+    // Check LibreOffice (used by documents)
+    if !util::has_lo() {
+        issues.push(("LibreOffice", "Document conversion"));
+    }
+
+    if issues.is_empty() {
+        println!("  {} All required tools are installed:\n", style("✓").green());
+        println!("  {} ffmpeg — audio/video", style("✓").green());
+        println!("  {} ImageMagick — images", style("✓").green());
+        println!("  {} Ghostscript — PDF", style("✓").green());
+        println!("  {} LibreOffice — documents", style("✓").green());
+        println!("\n  {} System is ready for conversions\n", style("✓").green().bold());
+        return Ok(());
+    }
+
+    println!("  {} {} tool{} missing:\n", style("✗").red(), issues.len(), if issues.len() == 1 { "" } else { "s" });
+    for (tool, purpose) in &issues {
+        println!("  {} {} — {}", style("✗").red(), style(tool).white().bold(), purpose);
+    }
+
+    println!("\n  {} Install missing tools:\n", style("ℹ").cyan());
+    println!("  {} rusty-crunch can auto-install on supported systems", style("·").dim());
+    println!("  {} Or install manually: https://github.com/pablogonz12/rusty-crunch#installation\n", style("·").dim());
+
     Ok(())
 }

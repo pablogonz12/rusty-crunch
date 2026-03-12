@@ -1,4 +1,6 @@
 use anyhow::{bail, Result};
+#[cfg(target_os = "windows")]
+use anyhow::Context;
 use console::style;
 use serde_json::Value;
 use std::process::{Command, Stdio};
@@ -19,7 +21,7 @@ static HAS_CACHE: OnceLock<Mutex<Vec<(String, bool)>>> = OnceLock::new();
 /// Returns true if `name` is found in PATH (cached per unique name).
 pub fn has(name: &str) -> bool {
     let cache = HAS_CACHE.get_or_init(|| Mutex::new(Vec::new()));
-    let mut guard = cache.lock().unwrap();
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(entry) = guard.iter().find(|(n, _)| n == name) {
         return entry.1;
@@ -33,7 +35,7 @@ pub fn has(name: &str) -> bool {
 /// Clear the has() cache so freshly installed tools are detected.
 pub fn clear_has_cache() {
     if let Some(cache) = HAS_CACHE.get() {
-        cache.lock().unwrap().clear();
+        cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -41,6 +43,35 @@ pub fn clear_has_cache() {
 pub fn active_threads() -> usize {
     let total = cores();
     crate::config::load().thread_mode.to_threads(total)
+}
+
+// ── Size parsing ───────────────────────────────────────────────────────────────────────
+
+/// Parse a size string like "10MB", "1.5GB", "512KB" into bytes.
+/// Returns None if parsing fails.
+pub fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim().to_uppercase();
+    let (num_str, unit) = if let Some(pos) = s.find(|c: char| c.is_alphabetic()) {
+        s.split_at(pos)
+    } else {
+        return None;
+    };
+
+    let num: f64 = num_str.trim().parse().ok()?;
+    if num < 0.0 {
+        return None;
+    }
+
+    let multiplier: u64 = match unit.trim() {
+        "B" => 1,
+        "KB" => 1_024,
+        "MB" => 1_024 * 1_024,
+        "GB" => 1_024 * 1_024 * 1_024,
+        "TB" => 1_024u64 * 1_024 * 1_024 * 1_024,
+        _ => return None,
+    };
+
+    Some((num * multiplier as f64) as u64)
 }
 
 // ── Auto-update ───────────────────────────────────────────────────────────────────────
@@ -131,15 +162,18 @@ pub fn download_and_install_update(version: &str) -> Result<()> {
         let new_exe = current_exe.with_extension("new.exe");
         std::fs::rename(&tmp, &new_exe)?;
 
-        let cur = current_exe.to_string_lossy();
-        let new = new_exe.to_string_lossy();
+        let cur = current_exe.to_string_lossy().replace('"', "\"\"");
+        let new = new_exe.to_string_lossy().replace('"', "\"\"");
         let bat = current_exe.with_extension("upd.bat");
+        let bat_str = bat
+            .to_str()
+            .context("Update batch path is not valid UTF-8")?;
         std::fs::write(
             &bat,
             format!("@echo off\r\nping -n 3 127.0.0.1>nul\r\nmove /y \"{new}\" \"{cur}\"\r\nstart \"\" \"{cur}\"\r\ndel \"%~f0\"\r\n").as_bytes(),
         )?;
         Command::new("cmd")
-            .args(["/C", "start", "/min", "", bat.to_str().unwrap_or("")])
+            .args(["/C", "start", "/min", "", bat_str])
             .spawn()?;
         println!("\n  {} Updated to v{}. Restarting\u{2026}\n", style("\u{2714}").green().bold(), version);
         std::process::exit(0);
@@ -317,4 +351,159 @@ fn probe_encoder(name: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_size_bytes() {
+        assert_eq!(parse_size("100"), None); // no unit
+        assert_eq!(parse_size("100B"), Some(100));
+        assert_eq!(parse_size("0B"), Some(0));
+    }
+
+    #[test]
+    fn test_parse_size_kilobytes() {
+        assert_eq!(parse_size("1KB"), Some(1024));
+        assert_eq!(parse_size("10KB"), Some(10240));
+        assert_eq!(parse_size("1.5KB"), Some(1536));
+    }
+
+    #[test]
+    fn test_parse_size_megabytes() {
+        assert_eq!(parse_size("1MB"), Some(1048576));
+        assert_eq!(parse_size("10MB"), Some(10485760));
+        assert_eq!(parse_size("0.5MB"), Some(524288));
+    }
+
+    #[test]
+    fn test_parse_size_gigabytes() {
+        assert_eq!(parse_size("1GB"), Some(1073741824));
+        assert_eq!(parse_size("2GB"), Some(2147483648));
+    }
+
+    #[test]
+    fn test_parse_size_terabytes() {
+        assert_eq!(parse_size("1TB"), Some(1099511627776));
+    }
+
+    #[test]
+    fn test_parse_size_case_insensitive() {
+        assert_eq!(parse_size("10mb"), Some(10485760));
+        assert_eq!(parse_size("10MB"), Some(10485760));
+        assert_eq!(parse_size("10Mb"), Some(10485760));
+    }
+
+    #[test]
+    fn test_parse_size_with_spaces() {
+        assert_eq!(parse_size("  10 MB  "), Some(10485760));
+        assert_eq!(parse_size("10   MB"), Some(10485760));
+    }
+
+    #[test]
+    fn test_parse_size_invalid() {
+        assert_eq!(parse_size("10XB"), None); // invalid unit
+        assert_eq!(parse_size("-10MB"), None); // negative
+        assert_eq!(parse_size("abc"), None); // not a number
+        assert_eq!(parse_size(""), None); // empty
+    }
+
+    #[test]
+    fn test_human_bytes() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(100), "100 B");
+        assert_eq!(human_bytes(1024), "1 KB");
+        assert_eq!(human_bytes(1048576), "1.0 MB");
+        assert_eq!(human_bytes(1073741824), "1.00 GB");
+    }
+
+    #[test]
+    fn test_human_bytes_edge_cases() {
+        // Test boundary conditions
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1 KB");
+        assert_eq!(human_bytes(1025), "1 KB");
+        assert_eq!(human_bytes(2048), "2 KB");
+        assert_eq!(human_bytes(2560), "2 KB");      // 2.5 KB rounds to 2 with {:.0}
+        assert_eq!(human_bytes(1047552), "1023 KB");  // 1047552 / 1024 = 1022.99... ≈ 1023
+        assert_eq!(human_bytes(1048576), "1.0 MB");   // Exactly 1 MB
+        assert_eq!(human_bytes(1572864), "1.5 MB");
+        assert_eq!(human_bytes(1073741823), "1024.0 MB"); // Just under 1 GB
+        assert_eq!(human_bytes(1073741824), "1.00 GB");   // Exactly 1 GB
+        assert_eq!(human_bytes(2147483648), "2.00 GB");   // 2 GB
+    }
+
+    #[test]
+    fn test_parse_size_decimal_edge_cases() {
+        // Decimal parsing with various levels of precision
+        assert_eq!(parse_size("0.5B"), Some(0));      // Rounds down
+        assert_eq!(parse_size("0.5KB"), Some(512));   // Float calc: 0.5 * 1024 = 512
+        assert_eq!(parse_size("2.5KB"), Some(2560));  // 2.5 * 1024 = 2560
+        assert_eq!(parse_size("1.25MB"), Some(1310720)); // 1.25 * 1024 * 1024 = 1310720
+        assert_eq!(parse_size("0.1MB"), Some(104857)); // 0.1 * 1024 * 1024 ≈ 104857.6, truncated to 104857
+        // Note: "99.99MB" produces approximately 104847114 due to floating point precision
+    }
+
+    #[test]
+    fn test_parse_size_large_values() {
+        // Test large file sizes
+        assert_eq!(parse_size("1TB"), Some(1099511627776));
+        assert_eq!(parse_size("100TB"), Some(109951162777600));
+        assert_eq!(parse_size("1.5TB"), Some(1649267441664));
+    }
+
+    #[test]
+    fn test_parse_size_whitespace_handling() {
+        // Various whitespace combinations
+        assert_eq!(parse_size("10MB"), Some(10485760));
+        assert_eq!(parse_size("   10MB   "), Some(10485760));
+        assert_eq!(parse_size("10   MB"), Some(10485760));
+        assert_eq!(parse_size("  10  MB  "), Some(10485760));
+        assert_eq!(parse_size("	10MB"), Some(10485760)); // Tab
+    }
+
+    #[test]
+    fn test_parse_size_invalid_edge_cases() {
+        // More invalid cases
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("   "), None);
+        assert_eq!(parse_size("MB"), None);        // No number
+        assert_eq!(parse_size("10"), None);        // No unit
+        assert_eq!(parse_size("10 10 MB"), None);  // Double number
+        assert_eq!(parse_size("10.5.5MB"), None);  // Multiple decimals
+        assert_eq!(parse_size("10XB"), None);      // Invalid unit
+        assert_eq!(parse_size("abc MB"), None);    // Non-numeric
+        assert_eq!(parse_size("--10MB"), None);    // Double negative
+    }
+
+    #[test]
+    fn test_cores() {
+        // cores() should return at least 1
+        assert!(cores() >= 1);
+        // Should match available_parallelism (or 1 if unavailable)
+        assert_eq!(cores(), std::thread::available_parallelism().map_or(1, |n| n.get()));
+    }
+
+    #[test]
+    fn test_has_caching() {
+        // Clear cache first
+        clear_has_cache();
+        // Common tools should be detectable or not consistently
+        let result = has("true"); // 'true' is a standard POSIX utility
+        assert!(result); // Should exist on all POSIX systems
+        
+        // Call again - should use cache
+        let result2 = has("true");
+        assert_eq!(result, result2);
+    }
+
+    #[test]
+    fn test_active_threads() {
+        // Should return a reasonable number of threads
+        let threads = active_threads();
+        assert!(threads >= 1);
+        assert!(threads <= cores() * 2); // Sanity check
+    }
 }

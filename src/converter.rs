@@ -21,8 +21,17 @@ fn run(cmd: &mut Command, ctx: &str) -> Result<()> {
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let first_line = stderr.lines().next().unwrap_or("unknown error");
-    bail!("{ctx}: {first_line}");
+    let details = stderr
+        .lines()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("\n  ");
+    let details = if details.trim().is_empty() {
+        "unknown error".to_string()
+    } else {
+        details
+    };
+    bail!("{ctx}:\n  {details}");
 }
 
 pub fn convert(
@@ -161,7 +170,7 @@ fn convert_document(input: &Path, output: &Path, in_fmt: &str, out_fmt: &str) ->
     }
 
     // LibreOffice is NOT thread-safe — serialize with a mutex
-    let _guard = LO_LOCK.lock().unwrap();
+    let _guard = LO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let out_dir = output.parent().unwrap_or(Path::new("."));
     let lo = util::lo_command();
     let mut cmd = Command::new(lo);

@@ -116,27 +116,21 @@ fn scoop_pkg(tool: &'static str) -> &'static str {
 }
 
 /// Run a shell command for installing a package.
-fn run_install(full_cmd: &str) -> Result<bool> {
-    #[cfg(target_os = "windows")]
-    {
-        let status = Command::new("cmd")
-            .args(["/C", full_cmd])
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()?;
-        Ok(status.success())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let status = Command::new("sh")
-            .args(["-c", full_cmd])
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()?;
-        Ok(status.success())
-    }
+fn run_install(pm_cmd: &str, pkg: &str) -> Result<bool> {
+    let mut parts = pm_cmd.split_whitespace();
+    let Some(program) = parts.next() else {
+        bail!("Invalid package manager command");
+    };
+
+    let mut cmd = Command::new(program);
+    cmd.args(parts)
+        .arg(pkg)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let status = cmd.status()?;
+    Ok(status.success())
 }
 
 /// Check that all tools needed for `media` are present.
@@ -184,7 +178,7 @@ pub fn ensure(media: MediaType) -> Result<()> {
         );
 
         let full = format!("{pm_cmd} {pkg}");
-        if !run_install(&full)? {
+        if !run_install(pm_cmd, pkg)? {
             bail!(
                 "Failed to install `{pkg}`. Try running manually:\n  {full}"
             );
@@ -252,6 +246,7 @@ pub fn ensure(media: MediaType) -> Result<()> {
 }
 
 /// Pause until the user presses Enter.
+#[allow(dead_code)]
 fn wait_for_enter() {
     use std::io::{self, Write};
     print!("  Press Enter to continue...");
@@ -416,8 +411,7 @@ pub fn clean_installed() -> Result<()> {
             style("🗑").cyan(),
             style(name).white().bold(),
         );
-        let full = format!("{uprefix} {pkg_name}");
-        if run_install(&full)? {
+        if run_install(&uprefix, pkg_name)? {
             println!("  {} {} removed", style("\u{2713}").green(), style(name).white());
         } else {
             println!("  {} Failed to remove {}", style("\u{2717}").red(), style(name).red());

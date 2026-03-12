@@ -22,6 +22,15 @@ fn clean_path(p: PathBuf) -> PathBuf {
     p
 }
 
+fn ensure_folder_access(path: &std::path::Path) -> Result<()> {
+    if !path.is_dir() {
+        anyhow::bail!("Not a directory: {}", path.display());
+    }
+    let _ = std::fs::read_dir(path)
+        .map_err(|e| anyhow::anyhow!("Cannot read directory {}: {}", path.display(), e))?;
+    Ok(())
+}
+
 /// None = user pressed Escape (go back).
 pub fn select_media_type() -> Result<Option<MediaType>> {
     let items: Vec<String> = MediaType::ALL.iter().map(|m| m.display_item()).collect();
@@ -84,7 +93,18 @@ pub fn select_folder(cfg: &Config) -> Result<Option<PathBuf>> {
     let start = if let Some(ref f) = cfg.default_folder {
         let p = PathBuf::from(f);
         if p.is_dir() {
-            clean_path(p.canonicalize().unwrap_or_else(|_| p.clone()))
+            match p.canonicalize() {
+                Ok(c) => clean_path(c),
+                Err(e) => {
+                    println!(
+                        "  {} Could not canonicalize configured folder ({}): {}",
+                        style("⚠").yellow(),
+                        p.display(),
+                        e
+                    );
+                    clean_path(p)
+                }
+            }
         } else {
             std::env::current_dir()?
         }
@@ -161,7 +181,13 @@ fn browse_directory(start: PathBuf) -> Result<Option<PathBuf>> {
                     p
                 };
                 match p.canonicalize() {
-                    Ok(p) if p.is_dir() => return Ok(Some(clean_path(p))),
+                    Ok(p) => {
+                        if let Err(e) = ensure_folder_access(&p) {
+                            println!("  {} {}", style("✗").red(), e);
+                        } else {
+                            return Ok(Some(clean_path(p)));
+                        }
+                    }
                     _ => {
                         println!(
                             "  {} Not a valid directory",
@@ -290,4 +316,28 @@ pub fn select_output_destination() -> Result<Option<String>> {
             }
         }
     }
+}
+
+/// Ask user how to handle existing output files.
+#[allow(dead_code)]
+pub fn select_conflict_strategy() -> Result<crate::config::ConflictStrategy> {
+    use crate::config::ConflictStrategy;
+
+    let items = [
+        "⊘ Skip existing files (safest)",
+        "⚡ Overwrite existing files",
+        "🔄 Rename with suffix (.1, .2, ...)",
+    ];
+
+    let sel = Select::with_theme(&theme())
+        .with_prompt("What if output file already exists?")
+        .items(&items)
+        .default(0)
+        .interact()?;
+
+    Ok(match sel {
+        0 => ConflictStrategy::Skip,
+        1 => ConflictStrategy::Overwrite,
+        _ => ConflictStrategy::Rename,
+    })
 }
