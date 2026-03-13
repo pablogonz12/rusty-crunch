@@ -156,6 +156,9 @@ pub fn recommended_conversions() -> &'static [(MediaType, &'static str, &'static
     &[
         // Audio: lossless → FLAC
         (MediaType::Audio, "WAV", "FLAC"),
+        (MediaType::Audio, "AIFF", "FLAC"),
+        (MediaType::Audio, "AIFF", "FLAC"),
+        (MediaType::Audio, "AIFF", "FLAC"),
         // Audio: lossy → OPUS
         (MediaType::Audio, "MP3", "OPUS"),
         (MediaType::Audio, "OGG", "OPUS"),

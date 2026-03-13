@@ -775,6 +775,12 @@ fn scan_and_convert(rules: &[AgentRule], processed: &mut HashSet<PathBuf>) -> us
                         lc == input_ext
                             || (input_ext == "jpeg" && lc == "jpg")
                             || (input_ext == "jpg" && lc == "jpeg")
+                        || (input_ext == "aiff" && lc == "aif")
+                        || (input_ext == "aif" && lc == "aiff")
+                        || (input_ext == "aiff" && lc == "aif")
+                        || (input_ext == "aif" && lc == "aiff")
+                        || (input_ext == "aiff" && lc == "aif")
+                        || (input_ext == "aif" && lc == "aiff")
                     })
                     .unwrap_or(false)
             })
@@ -817,6 +823,12 @@ fn matches_rule(path: &Path, rule: &AgentRule) -> bool {
             lc == input_ext
                 || (input_ext == "jpeg" && lc == "jpg")
                 || (input_ext == "jpg" && lc == "jpeg")
+                        || (input_ext == "aiff" && lc == "aif")
+                        || (input_ext == "aif" && lc == "aiff")
+                        || (input_ext == "aiff" && lc == "aif")
+                        || (input_ext == "aif" && lc == "aiff")
+                        || (input_ext == "aiff" && lc == "aif")
+                        || (input_ext == "aif" && lc == "aiff")
         })
         .unwrap_or(false)
 }

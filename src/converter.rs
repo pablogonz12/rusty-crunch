@@ -63,6 +63,7 @@ fn convert_audio(input: &Path, output: &Path, out_fmt: &str) -> Result<()> {
         "OGG" => { cmd.args(["-c:a", "libvorbis", "-q:a", "6"]); }
         "MP3" => { cmd.args(["-c:a", "libmp3lame", "-q:a", "2"]); }
         "WMA" => { cmd.args(["-c:a", "wmav2", "-b:a", "192k"]); }
+        "WAV" | "AIFF" => {}
         _ => { cmd.args(["-q:a", "0"]); }
     }
 
