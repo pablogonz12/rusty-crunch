@@ -167,15 +167,50 @@ fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Quality, s
         "TS" => {
             let enc = util::best_h264_encoder();
             cmd.args(["-c:v", enc.name]);
-            cmd.args(enc.quality_args);
+            match enc.name {
+                "h264_videotoolbox" => {
+                    let q = match quality { Quality::High => "80", Quality::Medium => "65", Quality::Low => "50" };
+                    cmd.args(["-q:v", q]);
+                }
+                "h264_nvenc" => {
+                    let q = match quality { Quality::High => "18", Quality::Medium => "23", Quality::Low => "28" };
+                    cmd.args(["-preset", "p4", "-cq", q]);
+                }
+                "h264_qsv" => {
+                    let q = match quality { Quality::High => "18", Quality::Medium => "23", Quality::Low => "28" };
+                    cmd.args(["-global_quality", q]);
+                }
+                "libx264" => {
+                    cmd.args(["-preset", "medium", "-crf", crf]);
+                }
+                _ => { cmd.args(enc.quality_args); }
+            }
             cmd.args(["-threads", &threads, "-c:a", "aac"]);
         }
         _ => {
             // MP4/MKV/MOV/FLV — try hardware-accelerated H.264, fall back to libx264
             let enc = util::best_h264_encoder();
             cmd.args(["-c:v", enc.name]);
-            cmd.args(enc.quality_args);
-            cmd.args(["-threads", &threads, "-c:a", "aac"]);
+            match enc.name {
+                "h264_videotoolbox" => {
+                    let q = match quality { Quality::High => "80", Quality::Medium => "65", Quality::Low => "50" };
+                    cmd.args(["-q:v", q]);
+                }
+                "h264_nvenc" => {
+                    let cq = match quality { Quality::High => "18", Quality::Medium => "23", Quality::Low => "28" };
+                    cmd.args(["-preset", "p4", "-cq", cq]);
+                }
+                "h264_qsv" => {
+                    let q = match quality { Quality::High => "18", Quality::Medium => "23", Quality::Low => "28" };
+                    cmd.args(["-global_quality", q]);
+                }
+                "libx264" => {
+                    cmd.args(["-preset", "medium", "-crf", crf]);
+                }
+                _ => { cmd.args(enc.quality_args); }
+            }
+            let a_br = match quality { Quality::High => "256k", Quality::Medium => "192k", Quality::Low => "128k" };
+            cmd.args(["-threads", &threads, "-c:a", "aac", "-b:a", a_br]);
         }
     }
 
