@@ -1,4 +1,5 @@
 use crate::formats::MediaType;
+use crate::processor::{Quality, VideoScale, ImageScale};
 use crate::util;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -41,18 +42,22 @@ pub fn convert(
     input_fmt: &str,
     output_fmt: &str,
     normalize_audio: bool,
+    quality: Quality,
+    keep_metadata: bool,
+    video_scale: VideoScale,
+    image_scale: ImageScale,
 ) -> Result<()> {
     match media_type {
-        MediaType::Audio => convert_audio(input, output, output_fmt, normalize_audio),
-        MediaType::Video => convert_video(input, output, output_fmt),
-        MediaType::Images => convert_image(input, output, output_fmt),
+        MediaType::Audio => convert_audio(input, output, output_fmt, normalize_audio, quality, keep_metadata),
+        MediaType::Video => convert_video(input, output, output_fmt, quality, video_scale, keep_metadata),
+        MediaType::Images => convert_image(input, output, output_fmt, quality, image_scale, keep_metadata),
         MediaType::Documents => convert_document(input, output, input_fmt, output_fmt),
     }
 }
 
 // ── Audio ──────────────────────────────────────────────────────────────
 
-fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bool) -> Result<()> {
+fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bool, quality: Quality, keep_metadata: bool) -> Result<()> {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-i"]);
     cmd.arg(input);
@@ -95,7 +100,7 @@ fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bo
 
 // ── Video ──────────────────────────────────────────────────────────────
 
-fn convert_video(input: &Path, output: &Path, out_fmt: &str) -> Result<()> {
+fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Quality, scale: VideoScale, keep_metadata: bool) -> Result<()> {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-i"]);
     cmd.arg(input);
@@ -145,7 +150,7 @@ fn convert_video(input: &Path, output: &Path, out_fmt: &str) -> Result<()> {
 
 // ── Images ─────────────────────────────────────────────────────────────
 
-fn convert_image(input: &Path, output: &Path, out_fmt: &str) -> Result<()> {
+fn convert_image(input: &Path, output: &Path, out_fmt: &str, quality: Quality, scale: ImageScale, keep_metadata: bool) -> Result<()> {
     let bin = util::magick_command();
 
     let mut cmd = Command::new(bin);

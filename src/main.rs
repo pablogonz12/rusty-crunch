@@ -162,6 +162,10 @@ fn run_crunch(cli: &Cli) -> Result<()> {
         input_fmt: &'static str,
         output_fmt: &'static str,
         normalize_audio: bool,
+        quality: crate::processor::Quality,
+        keep_metadata: bool,
+        video_scale: crate::processor::VideoScale,
+        image_scale: crate::processor::ImageScale,
     }
 
     let mut specs: Vec<JobSpec> = Vec::new();
@@ -194,7 +198,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
         // "All Lossless Audio → FLAC" batch shortcut
         if raw_input == formats::LOSSLESS_AUDIO_SENTINEL {
             for &fmt in formats::LOSSLESS_AUDIO_INPUTS {
-                specs.push(JobSpec { media: formats::MediaType::Audio, input_fmt: fmt, output_fmt: "FLAC", normalize_audio });
+                specs.push(JobSpec { media: formats::MediaType::Audio, input_fmt: fmt, output_fmt: "FLAC", normalize_audio, quality: prompt::select_quality().unwrap_or(crate::processor::Quality::High), keep_metadata: prompt::confirm_keep_metadata().unwrap_or(true), video_scale: crate::processor::VideoScale::Original, image_scale: crate::processor::ImageScale::Original });
             }
             ack("Added", &format!("{} → FLAC", formats::LOSSLESS_AUDIO_INPUTS.join("/")));
         } else {
@@ -209,7 +213,16 @@ fn run_crunch(cli: &Cli) -> Result<()> {
                 }
             };
             ack("Output format", output_fmt);
-            specs.push(JobSpec { media, input_fmt: raw_input, output_fmt, normalize_audio });
+            specs.push(JobSpec { 
+                media, 
+                input_fmt: raw_input, 
+                output_fmt, 
+                normalize_audio,
+                quality: prompt::select_quality()?,
+                keep_metadata: prompt::confirm_keep_metadata()?,
+                video_scale: if media == formats::MediaType::Video { prompt::select_video_scale()? } else { crate::processor::VideoScale::Original },
+                image_scale: if media == formats::MediaType::Images { prompt::select_image_scale()? } else { crate::processor::ImageScale::Original },
+            });
         }
 
         // Cap at 8 jobs; ask about adding more
@@ -280,6 +293,10 @@ fn run_crunch(cli: &Cli) -> Result<()> {
             max_file_size: max_size,
             conflict_strategy: cfg.conflict_strategy,
             normalize_audio: s.normalize_audio,
+            quality: crate::processor::Quality::High,
+            keep_metadata: true,
+            video_scale: crate::processor::VideoScale::Original,
+            image_scale: crate::processor::ImageScale::Original,
         })?;
         summaries.push(summary);
     }
@@ -503,6 +520,10 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
             max_file_size: None,
             conflict_strategy: cfg.conflict_strategy,
             normalize_audio: false,
+            quality: crate::processor::Quality::High,
+            keep_metadata: true,
+            video_scale: crate::processor::VideoScale::Original,
+            image_scale: crate::processor::ImageScale::Original,
         })?;
         summaries.push(summary);
     }

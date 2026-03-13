@@ -354,3 +354,74 @@ pub fn confirm_audio_normalization() -> Result<bool> {
         .interact_opt()?;
     Ok(sel == Some(1))
 }
+
+
+pub fn select_quality() -> Result<crate::processor::Quality> {
+    let items = [
+        "High (Best quality, larger file)",
+        "Medium (Balanced)",
+        "Low (Smallest file, noticeably compressed)",
+    ];
+    let sel = Select::with_theme(&theme())
+        .with_prompt("Select overall compression quality")
+        .items(&items)
+        .default(1)
+        .interact_opt()?;
+        
+    Ok(match sel {
+        Some(0) => crate::processor::Quality::High,
+        Some(2) => crate::processor::Quality::Low,
+        _ => crate::processor::Quality::Medium,
+    })
+}
+
+pub fn select_video_scale() -> Result<crate::processor::VideoScale> {
+    let items = [
+        "Keep Original Resolution",
+        "Scale down to 1080p",
+        "Scale down to 720p",
+    ];
+    let sel = Select::with_theme(&theme())
+        .with_prompt("Select video resolution scaling")
+        .items(&items)
+        .default(0)
+        .interact_opt()?;
+        
+    Ok(match sel {
+        Some(1) => crate::processor::VideoScale::P1080,
+        Some(2) => crate::processor::VideoScale::P720,
+        _ => crate::processor::VideoScale::Original,
+    })
+}
+
+pub fn select_image_scale() -> Result<crate::processor::ImageScale> {
+    let items = [
+        "Keep Original Resolution",
+        "Scale width to 1920px max",
+        "Scale width to 1080px max",
+    ];
+    let sel = Select::with_theme(&theme())
+        .with_prompt("Select image scaling")
+        .items(&items)
+        .default(0)
+        .interact_opt()?;
+        
+    Ok(match sel {
+        Some(1) => crate::processor::ImageScale::W1920,
+        Some(2) => crate::processor::ImageScale::W1080,
+        _ => crate::processor::ImageScale::Original,
+    })
+}
+
+pub fn confirm_keep_metadata() -> Result<bool> {
+    let items = [
+        "Yes, keep metadata (EXIF, tags, etc.)",
+        "No, strip metadata (Privacy/Size)",
+    ];
+    let sel = Select::with_theme(&theme())
+        .with_prompt("Keep original file metadata?")
+        .items(&items)
+        .default(0)
+        .interact_opt()?;
+    Ok(sel == Some(0))
+}

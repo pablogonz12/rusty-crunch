@@ -14,12 +14,26 @@ use std::sync::Mutex;
 use std::time::{Instant, SystemTime};
 use walkdir::WalkDir;
 
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Quality { High, Medium, Low }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VideoScale { Original, P1080, P720 }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ImageScale { Original, W1920, W1080 }
+
 pub struct Job<'a> {
     pub folder: &'a Path,
     pub media_type: MediaType,
     pub input_fmt: &'a str,
     pub output_fmt: &'a str,
     pub normalize_audio: bool,
+    pub quality: Quality,
+    pub keep_metadata: bool,
+    pub video_scale: VideoScale,
+    pub image_scale: ImageScale,
     pub recursive: bool,
     pub delete_originals: bool,
     pub dry_run: bool,
@@ -315,6 +329,10 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
             job.input_fmt,
             job.output_fmt,
             job.normalize_audio,
+            job.quality,
+            job.keep_metadata,
+            job.video_scale,
+            job.image_scale,
         ) {
             Ok(()) => {
                 let output_size = final_output_path.metadata().map(|m| m.len()).unwrap_or(0);
