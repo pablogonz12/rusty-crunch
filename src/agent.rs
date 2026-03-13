@@ -788,7 +788,7 @@ fn scan_and_convert(rules: &[AgentRule], processed: &mut HashSet<PathBuf>) -> us
                 if same_ext {
                     return true;
                 }
-                let output = e.path().with_extension(&output_ext);
+                let output = e.path().with_extension(&*output_ext);
                 !output.exists()
             })
             .map(|e| e.into_path())
@@ -835,7 +835,7 @@ fn matches_rule(path: &Path, rule: &AgentRule) -> bool {
 
 fn process_file(path: &Path, rule: &AgentRule) -> bool {
     let output_ext = output_extension(&rule.output_fmt);
-    let output_path = path.with_extension(&output_ext);
+    let output_path = path.with_extension(&*output_ext);
     let same_ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -892,11 +892,20 @@ fn process_file(path: &Path, rule: &AgentRule) -> bool {
     }
 }
 
-fn output_extension(fmt: &str) -> String {
+use std::borrow::Cow;
+
+fn output_extension<'a>(fmt: &'a str) -> Cow<'a, str> {
     match fmt {
-        "PDF (Optimized)" => "pdf".to_string(),
-        "JPEG" => "jpg".to_string(),
-        other => other.to_ascii_lowercase(),
+        "PDF (Optimized)" => Cow::Borrowed("pdf"),
+        "JPEG" => Cow::Borrowed("jpg"),
+        other => {
+            // Check if already lowercase to avoid allocation
+            if other.chars().all(|c| c.is_ascii_lowercase() || !c.is_ascii_alphabetic()) {
+                Cow::Borrowed(other)
+            } else {
+                Cow::Owned(other.to_ascii_lowercase())
+            }
+        }
     }
 }
 

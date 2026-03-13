@@ -300,11 +300,10 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
 
         // Skip files already optimized (same-extension jobs like PDF → PDF)
         if same_ext {
-            let key = input_path.to_string_lossy();
             if let Some(entry) = cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .get(key.as_ref())
+                .get(input_path)
             {
                 if entry.matches(input_path) {
                     skip_count.fetch_add(1, Ordering::Relaxed);
@@ -369,11 +368,10 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
                 // Record file state so we skip it on future runs
                 if same_ext {
                     if let Some(stamp) = CacheEntry::from_path(input_path) {
-                        let key = input_path.to_string_lossy().into_owned();
                         cache
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
-                            .insert(key, stamp);
+                            .insert(input_path.to_path_buf(), stamp);
                     }
                 }
 
@@ -555,7 +553,7 @@ fn opt_cache_path() -> PathBuf {
         .join("opt_cache.json")
 }
 
-fn load_opt_cache() -> HashMap<String, CacheEntry> {
+fn load_opt_cache() -> HashMap<PathBuf, CacheEntry> {
     let path = opt_cache_path();
     std::fs::read_to_string(&path)
         .ok()
@@ -563,7 +561,7 @@ fn load_opt_cache() -> HashMap<String, CacheEntry> {
         .unwrap_or_default()
 }
 
-fn save_opt_cache(cache: &HashMap<String, CacheEntry>) {
+fn save_opt_cache(cache: &HashMap<PathBuf, CacheEntry>) {
     let path = opt_cache_path();
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -629,15 +627,15 @@ mod tests {
     #[test]
     fn cache_roundtrip_serialize() {
         let mut cache = HashMap::new();
-        cache.insert("/tmp/a.pdf".to_string(), CacheEntry { size: 100, modified: 1234567890 });
-        cache.insert("/tmp/b.pdf".to_string(), CacheEntry { size: 200, modified: 9876543210 });
+        cache.insert(PathBuf::from("/tmp/a.pdf"), CacheEntry { size: 100, modified: 1234567890 });
+        cache.insert(PathBuf::from("/tmp/b.pdf"), CacheEntry { size: 200, modified: 9876543210 });
 
         let json = serde_json::to_string(&cache).unwrap();
-        let loaded: HashMap<String, CacheEntry> = serde_json::from_str(&json).unwrap();
+        let loaded: HashMap<PathBuf, CacheEntry> = serde_json::from_str(&json).unwrap();
 
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded["/tmp/a.pdf"].size, 100);
-        assert_eq!(loaded["/tmp/b.pdf"].modified, 9876543210);
+        assert_eq!(loaded[&PathBuf::from("/tmp/a.pdf")].size, 100);
+        assert_eq!(loaded[&PathBuf::from("/tmp/b.pdf")].modified, 9876543210);
     }
 
     #[test]
@@ -683,12 +681,12 @@ mod tests {
 
     #[test]
     fn cache_empty_operations() {
-        let cache: HashMap<String, CacheEntry> = HashMap::new();
+        let cache: HashMap<PathBuf, CacheEntry> = HashMap::new();
         assert!(cache.is_empty());
         
         // Serialization of empty cache should work
         let json = serde_json::to_string(&cache).unwrap();
-        let restored: HashMap<String, CacheEntry> = serde_json::from_str(&json).unwrap();
+        let restored: HashMap<PathBuf, CacheEntry> = serde_json::from_str(&json).unwrap();
         assert!(restored.is_empty());
     }
 
@@ -711,10 +709,10 @@ mod tests {
         
         // Verify serialization works with large cache
         let json = serde_json::to_string(&cache).unwrap();
-        let restored: HashMap<String, CacheEntry> = serde_json::from_str(&json).unwrap();
+        let restored: HashMap<PathBuf, CacheEntry> = serde_json::from_str(&json).unwrap();
         
         assert_eq!(restored.len(), 1000);
-        assert_eq!(restored["/path/file999.bin"].size, 999 * 1024);
+        assert_eq!(restored[&PathBuf::from("/path/file999.bin")].size, 999 * 1024);
     }
 
     #[test]
