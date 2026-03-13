@@ -3,18 +3,19 @@ use crate::processor::{Quality, VideoScale, ImageScale};
 use crate::util;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use tokio::process::Command;
+use std::process::Stdio;
 use std::sync::Mutex;
 
 /// Global lock for LibreOffice — only one headless instance may run at a time per user profile.
 static LO_LOCK: Mutex<()> = Mutex::new(());
 
 /// Run an external command, suppress stdout/stderr, and return a nice error on failure.
-fn run(cmd: &mut Command, ctx: &str) -> Result<()> {
+async fn run(cmd: &mut Command, ctx: &str) -> Result<()> {
     let output = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
+        .output().await
         .with_context(|| format!("Failed to launch `{}` — is it installed?", ctx))?;
 
     if output.status.success() {
@@ -35,7 +36,7 @@ fn run(cmd: &mut Command, ctx: &str) -> Result<()> {
     bail!("{ctx}:\n  {details}");
 }
 
-pub fn convert(
+pub async fn convert(
     input: &Path,
     output: &Path,
     media_type: MediaType,
@@ -48,16 +49,16 @@ pub fn convert(
     image_scale: ImageScale,
 ) -> Result<()> {
     match media_type {
-        MediaType::Audio => convert_audio(input, output, output_fmt, normalize_audio, quality, keep_metadata),
-        MediaType::Video => convert_video(input, output, output_fmt, quality, video_scale, keep_metadata),
-        MediaType::Images => convert_image(input, output, output_fmt, quality, image_scale, keep_metadata),
-        MediaType::Documents => convert_document(input, output, input_fmt, output_fmt),
+        MediaType::Audio => convert_audio(input, output, output_fmt, normalize_audio, quality, keep_metadata).await,
+        MediaType::Video => convert_video(input, output, output_fmt, quality, video_scale, keep_metadata).await,
+        MediaType::Images => convert_image(input, output, output_fmt, quality, image_scale, keep_metadata).await,
+        MediaType::Documents => convert_document(input, output, input_fmt, output_fmt).await,
     }
 }
 
 // ── Audio ──────────────────────────────────────────────────────────────
 
-fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bool, quality: Quality, keep_metadata: bool) -> Result<()> {
+async fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bool, quality: Quality, keep_metadata: bool) -> Result<()> {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-i"]);
     cmd.arg(input);
@@ -104,7 +105,7 @@ fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bo
     };
 
     cmd.arg("-y").arg(&final_output);
-    let res = run(&mut cmd, "ffmpeg");
+    let res = run(&mut cmd, "ffmpeg").await;
 
     if is_inplace {
         if res.is_ok() {
@@ -119,7 +120,7 @@ fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bo
 
 // ── Video ──────────────────────────────────────────────────────────────
 
-fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Quality, scale: VideoScale, keep_metadata: bool) -> Result<()> {
+async fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Quality, scale: VideoScale, keep_metadata: bool) -> Result<()> {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-i"]);
     cmd.arg(input);
@@ -215,12 +216,12 @@ fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Quality, s
     }
 
     cmd.arg("-y").arg(output);
-    run(&mut cmd, "ffmpeg")
+    run(&mut cmd, "ffmpeg").await
 }
 
 // ── Images ─────────────────────────────────────────────────────────────
 
-fn convert_image(input: &Path, output: &Path, out_fmt: &str, quality: Quality, scale: ImageScale, keep_metadata: bool) -> Result<()> {
+async fn convert_image(input: &Path, output: &Path, out_fmt: &str, quality: Quality, scale: ImageScale, keep_metadata: bool) -> Result<()> {
     let bin = util::magick_command();
 
     let mut cmd = Command::new(bin);
@@ -252,12 +253,12 @@ fn convert_image(input: &Path, output: &Path, out_fmt: &str, quality: Quality, s
     }
 
     cmd.arg(output);
-    run(&mut cmd, bin)
+    run(&mut cmd, bin).await
 }
 
 // ── Documents ──────────────────────────────────────────────────────────
 
-fn convert_document(input: &Path, output: &Path, in_fmt: &str, out_fmt: &str) -> Result<()> {
+async fn convert_document(input: &Path, output: &Path, in_fmt: &str, out_fmt: &str) -> Result<()> {
     // PDF → PDF (Optimized): 150 PPI image downsampling, skip if no savings
     if in_fmt.eq_ignore_ascii_case("pdf") && out_fmt == "PDF (Optimized)" {
         return optimize_pdf(
@@ -275,12 +276,12 @@ fn convert_document(input: &Path, output: &Path, in_fmt: &str, out_fmt: &str) ->
                 "-dMonoImageDownsampleThreshold=1.0",
             ],
             true,
-        );
+        ).await;
     }
 
     // PDF → PDF: general optimization
     if in_fmt.eq_ignore_ascii_case("pdf") && out_fmt.eq_ignore_ascii_case("pdf") {
-        return optimize_pdf(input, output, &["-dPDFSETTINGS=/ebook"], false);
+        return optimize_pdf(input, output, &["-dPDFSETTINGS=/ebook"], false).await;
     }
 
     // LibreOffice is NOT thread-safe — serialize with a mutex
@@ -292,12 +293,12 @@ fn convert_document(input: &Path, output: &Path, in_fmt: &str, out_fmt: &str) ->
     cmd.arg(out_fmt.to_lowercase());
     cmd.arg("--outdir").arg(out_dir);
     cmd.arg(input);
-    run(&mut cmd, lo)
+    run(&mut cmd, lo).await
 }
 
 /// Run Ghostscript PDF optimization. Writes to a temp file, then renames.
 /// If `skip_if_larger` is true, files that don't shrink are left untouched.
-fn optimize_pdf(input: &Path, output: &Path, settings: &[&str], skip_if_larger: bool) -> Result<()> {
+async fn optimize_pdf(input: &Path, output: &Path, settings: &[&str], skip_if_larger: bool) -> Result<()> {
     let tmp = output.with_extension("pdf.tmp");
     let input_size = input.metadata().map(|m| m.len()).unwrap_or(0);
 
@@ -314,7 +315,7 @@ fn optimize_pdf(input: &Path, output: &Path, settings: &[&str], skip_if_larger: 
     cmd.arg(format!("-sOutputFile={}", tmp.display()));
     cmd.arg(input);
 
-    let result = run(&mut cmd, gs);
+    let result = run(&mut cmd, gs).await;
     if result.is_ok() {
         if skip_if_larger && input_size > 0 {
             let out_size = tmp.metadata().map(|m| m.len()).unwrap_or(0);

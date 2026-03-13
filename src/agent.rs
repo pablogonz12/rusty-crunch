@@ -850,7 +850,7 @@ fn process_file(path: &Path, rule: &AgentRule) -> bool {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let input_size = path.metadata().map(|m| m.len()).unwrap_or(0);
 
-    match converter::convert(
+    match tokio::runtime::Runtime::new().unwrap().block_on(converter::convert(
         path,
         &output_path,
         rule.media_type,
@@ -861,7 +861,9 @@ fn process_file(path: &Path, rule: &AgentRule) -> bool {
         true,
         crate::processor::VideoScale::Original,
         crate::processor::ImageScale::Original,
-    ) {
+    )) {
+
+
         Ok(()) => {
             let output_size = output_path.metadata().map(|m| m.len()).unwrap_or(0);
             let saved = input_size.saturating_sub(output_size);

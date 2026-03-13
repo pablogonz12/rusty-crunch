@@ -4,7 +4,7 @@ use crate::util;
 use anyhow::Result;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
-use rayon::prelude::*;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -222,14 +222,25 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
     let start = Instant::now();
 
     // Build a local rayon thread pool limited to job.threads
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(job.threads)
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(job.threads.max(1))
+        .enable_all()
         .build()
-        .ok();
+        .unwrap();
 
-    // ── Parallel processing via rayon ───────────────────────────────────────────
-    let worker = || {
-    files.par_iter().for_each(|input_path| {
+    rt.block_on(async {
+        futures::stream::iter(files).for_each_concurrent(job.threads.max(1), |input_path| {
+            let output_ext = output_ext.clone();
+            let pb = pb.clone();
+            let cache = &cache;
+            let skip_count = &skip_count;
+            let ok_count = &ok_count;
+            let err_count = &err_count;
+            let del_err_count = &del_err_count;
+            let saved_bytes = &saved_bytes;
+            let best_ratio = &best_ratio;
+            let worst_ratio = &worst_ratio;
+            async move {
         // Compute output path (respects optional sub-folder and preserves relative structure)
         let output_path = if let Some(sub) = job.output_subfolder {
             // Preserve relative directory structure under the subfolder
@@ -303,9 +314,9 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
             if let Some(entry) = cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .get(input_path)
+                .get(&input_path)
             {
-                if entry.matches(input_path) {
+                if entry.matches(&input_path) {
                     skip_count.fetch_add(1, Ordering::Relaxed);
                     pb.inc(1);
                     return;
@@ -321,8 +332,7 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
 
         let input_size = input_path.metadata().map(|m| m.len()).unwrap_or(0);
 
-        match converter::convert(
-            input_path,
+        match converter::convert(&input_path,
             &final_output_path,
             job.media_type,
             job.input_fmt,
@@ -332,7 +342,7 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
             job.keep_metadata,
             job.video_scale,
             job.image_scale,
-        ) {
+        ).await {
             Ok(()) => {
                 let output_size = final_output_path.metadata().map(|m| m.len()).unwrap_or(0);
                 if input_size > 0 {
@@ -360,14 +370,14 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
                 }
 
                 if job.delete_originals && !same_ext {
-                    if std::fs::remove_file(input_path).is_err() {
+                    if std::fs::remove_file(&input_path).is_err() {
                         del_err_count.fetch_add(1, Ordering::Relaxed);
                     }
                 }
 
                 // Record file state so we skip it on future runs
                 if same_ext {
-                    if let Some(stamp) = CacheEntry::from_path(input_path) {
+                    if let Some(stamp) = CacheEntry::from_path(&input_path) {
                         cache
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
@@ -395,14 +405,8 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
         }
 
         pb.inc(1);
+    } }).await;
     });
-    };
-
-    if let Some(pool) = &pool {
-        pool.install(worker);
-    } else {
-        worker();
-    }
 
     pb.finish_and_clear();
 
