@@ -161,6 +161,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
         media: formats::MediaType,
         input_fmt: &'static str,
         output_fmt: &'static str,
+        normalize_audio: bool,
     }
 
     let mut specs: Vec<JobSpec> = Vec::new();
@@ -182,10 +183,18 @@ fn run_crunch(cli: &Cli) -> Result<()> {
             None => continue 'outer,
         };
 
+        let mut normalize_audio = false;
+        if media == formats::MediaType::Audio {
+            normalize_audio = prompt::confirm_audio_normalization()?;
+            if normalize_audio {
+                ack("Normalize Volume", "Yes (-af loudnorm)");
+            }
+        }
+
         // "All Lossless Audio → FLAC" batch shortcut
         if raw_input == formats::LOSSLESS_AUDIO_SENTINEL {
             for &fmt in formats::LOSSLESS_AUDIO_INPUTS {
-                specs.push(JobSpec { media: formats::MediaType::Audio, input_fmt: fmt, output_fmt: "FLAC" });
+                specs.push(JobSpec { media: formats::MediaType::Audio, input_fmt: fmt, output_fmt: "FLAC", normalize_audio });
             }
             ack("Added", &format!("{} → FLAC", formats::LOSSLESS_AUDIO_INPUTS.join("/")));
         } else {
@@ -200,7 +209,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
                 }
             };
             ack("Output format", output_fmt);
-            specs.push(JobSpec { media, input_fmt: raw_input, output_fmt });
+            specs.push(JobSpec { media, input_fmt: raw_input, output_fmt, normalize_audio });
         }
 
         // Cap at 8 jobs; ask about adding more
@@ -270,6 +279,7 @@ fn run_crunch(cli: &Cli) -> Result<()> {
             min_file_size: min_size,
             max_file_size: max_size,
             conflict_strategy: cfg.conflict_strategy,
+            normalize_audio: s.normalize_audio,
         })?;
         summaries.push(summary);
     }
@@ -492,6 +502,7 @@ fn run_recommended_crunch(cli: &Cli) -> Result<()> {
             min_file_size: None,
             max_file_size: None,
             conflict_strategy: cfg.conflict_strategy,
+            normalize_audio: false,
         })?;
         summaries.push(summary);
     }

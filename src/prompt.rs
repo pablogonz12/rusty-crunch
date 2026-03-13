@@ -341,3 +341,16 @@ pub fn select_conflict_strategy() -> Result<crate::config::ConflictStrategy> {
         _ => ConflictStrategy::Rename,
     })
 }
+
+pub fn confirm_audio_normalization() -> Result<bool> {
+    let items = [
+        "No, keep original volume",
+        "🔊 Yes, normalize audio tracks (Loudness + Peak)",
+    ];
+    let sel = Select::with_theme(&theme())
+        .with_prompt("Do you want to normalize audio volume?")
+        .items(&items)
+        .default(0)
+        .interact_opt()?;
+    Ok(sel == Some(1))
+}

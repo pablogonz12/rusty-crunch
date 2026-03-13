@@ -40,9 +40,10 @@ pub fn convert(
     media_type: MediaType,
     input_fmt: &str,
     output_fmt: &str,
+    normalize_audio: bool,
 ) -> Result<()> {
     match media_type {
-        MediaType::Audio => convert_audio(input, output, output_fmt),
+        MediaType::Audio => convert_audio(input, output, output_fmt, normalize_audio),
         MediaType::Video => convert_video(input, output, output_fmt),
         MediaType::Images => convert_image(input, output, output_fmt),
         MediaType::Documents => convert_document(input, output, input_fmt, output_fmt),
@@ -51,7 +52,7 @@ pub fn convert(
 
 // ── Audio ──────────────────────────────────────────────────────────────
 
-fn convert_audio(input: &Path, output: &Path, out_fmt: &str) -> Result<()> {
+fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bool) -> Result<()> {
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-i"]);
     cmd.arg(input);
@@ -65,6 +66,10 @@ fn convert_audio(input: &Path, output: &Path, out_fmt: &str) -> Result<()> {
         "WMA" => { cmd.args(["-c:a", "wmav2", "-b:a", "192k"]); }
         "WAV" | "AIFF" => {}
         _ => { cmd.args(["-q:a", "0"]); }
+    }
+
+    if normalize_audio {
+        cmd.args(["-af", "loudnorm"]);
     }
 
     cmd.arg("-y").arg(output);

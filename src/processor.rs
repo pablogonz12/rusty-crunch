@@ -19,6 +19,7 @@ pub struct Job<'a> {
     pub media_type: MediaType,
     pub input_fmt: &'a str,
     pub output_fmt: &'a str,
+    pub normalize_audio: bool,
     pub recursive: bool,
     pub delete_originals: bool,
     pub dry_run: bool,
@@ -313,6 +314,7 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
             job.media_type,
             job.input_fmt,
             job.output_fmt,
+            job.normalize_audio,
         ) {
             Ok(()) => {
                 let output_size = final_output_path.metadata().map(|m| m.len()).unwrap_or(0);

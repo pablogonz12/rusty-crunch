@@ -856,6 +856,7 @@ fn process_file(path: &Path, rule: &AgentRule) -> bool {
         rule.media_type,
         &rule.input_fmt,
         &rule.output_fmt,
+        false,
     ) {
         Ok(()) => {
             let output_size = output_path.metadata().map(|m| m.len()).unwrap_or(0);
