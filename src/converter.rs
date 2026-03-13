@@ -105,6 +105,22 @@ fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Quality, s
     cmd.args(["-hide_banner", "-loglevel", "error", "-i"]);
     cmd.arg(input);
 
+    if !keep_metadata {
+        cmd.args(["-map_metadata", "-1"]);
+    }
+
+    match scale {
+        VideoScale::P1080 => { cmd.args(["-vf", "scale=-2:1080"]); }
+        VideoScale::P720 => { cmd.args(["-vf", "scale=-2:720"]); }
+        VideoScale::Original => {}
+    }
+
+    let crf = match quality {
+        Quality::High => "18",
+        Quality::Medium => "23",
+        Quality::Low => "28",
+    };
+
     let threads = util::cores().to_string();
 
     match out_fmt {
@@ -155,6 +171,22 @@ fn convert_image(input: &Path, output: &Path, out_fmt: &str, quality: Quality, s
 
     let mut cmd = Command::new(bin);
     cmd.arg(input);
+
+    if !keep_metadata {
+        cmd.arg("-strip");
+    }
+
+    match scale {
+        ImageScale::W1920 => { cmd.args(["-resize", "1920x>"]); }
+        ImageScale::W1080 => { cmd.args(["-resize", "1080x>"]); }
+        ImageScale::Original => {}
+    }
+
+    let q_val = match quality {
+        Quality::High => "92",
+        Quality::Medium => "82",
+        Quality::Low => "65",
+    };
 
     match out_fmt {
         "JPEG" => { cmd.args(["-quality", "85", "-sampling-factor", "4:2:0", "-strip"]); }
