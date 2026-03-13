@@ -46,15 +46,15 @@ impl MediaType {
     pub fn compatible_outputs(self, input: &str) -> &'static [&'static str] {
         match self {
             Self::Audio => match input {
-                "WAV"  => &["MP3", "OGG", "FLAC", "AAC", "M4A", "OPUS"],
-                "AIFF" => &["MP3", "OGG", "FLAC", "AAC", "M4A", "OPUS"],
-                "FLAC" => &["MP3", "OGG", "AAC", "M4A", "OPUS"],
-                "MP3"  => &["OGG", "AAC", "M4A", "OPUS"],
-                "OGG"  => &["MP3", "AAC", "M4A", "OPUS"],
-                "AAC"  => &["MP3", "OGG", "M4A", "OPUS"],
-                "M4A"  => &["MP3", "OGG", "AAC", "OPUS"],
-                "OPUS" => &["MP3", "OGG", "AAC", "M4A"],
-                "WMA"  => &["MP3", "OGG", "FLAC", "AAC", "M4A", "OPUS"],
+                "WAV"  => &["WAV", "MP3", "OGG", "FLAC", "AAC", "M4A", "OPUS"],
+                "AIFF" => &["AIFF", "MP3", "OGG", "FLAC", "AAC", "M4A", "OPUS"],
+                "FLAC" => &["FLAC", "MP3", "OGG", "AAC", "M4A", "OPUS"],
+                "MP3"  => &["MP3", "OGG", "AAC", "M4A", "OPUS"],
+                "OGG"  => &["OGG", "MP3", "AAC", "M4A", "OPUS"],
+                "AAC"  => &["AAC", "MP3", "OGG", "M4A", "OPUS"],
+                "M4A"  => &["M4A", "MP3", "OGG", "AAC", "OPUS"],
+                "OPUS" => &["OPUS", "MP3", "OGG", "AAC", "M4A"],
+                "WMA"  => &["WMA", "MP3", "OGG", "FLAC", "AAC", "M4A", "OPUS"],
                 _ => &[],
             },
             Self::Video => match input {
@@ -244,7 +244,7 @@ mod tests {
         let audio = MediaType::Audio;
         assert!(audio.compatible_outputs("MP3").contains(&"OGG"));
         assert!(audio.compatible_outputs("MP3").contains(&"AAC"));
-        assert!(!audio.compatible_outputs("MP3").contains(&"MP3")); // Can't convert to self
+        assert!(audio.compatible_outputs("MP3").contains(&"MP3")); // Can normalize in place
         
         assert!(audio.compatible_outputs("WAV").contains(&"FLAC"));
         assert!(audio.compatible_outputs("WAV").contains(&"MP3"));

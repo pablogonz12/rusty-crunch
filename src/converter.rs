@@ -72,8 +72,25 @@ fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bo
         cmd.args(["-af", "loudnorm"]);
     }
 
-    cmd.arg("-y").arg(output);
-    run(&mut cmd, "ffmpeg")
+    let is_inplace = input == output;
+    let final_output = if is_inplace {
+        output.with_extension(format!("tmp.{}", output.extension().unwrap_or_default().to_string_lossy()))
+    } else {
+        output.to_path_buf()
+    };
+
+    cmd.arg("-y").arg(&final_output);
+    let res = run(&mut cmd, "ffmpeg");
+
+    if is_inplace {
+        if res.is_ok() {
+            std::fs::rename(&final_output, output)?;
+        } else {
+            let _ = std::fs::remove_file(&final_output);
+        }
+    }
+
+    res
 }
 
 // ── Video ──────────────────────────────────────────────────────────────
