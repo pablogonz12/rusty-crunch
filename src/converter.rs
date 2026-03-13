@@ -62,13 +62,32 @@ fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bo
     cmd.args(["-hide_banner", "-loglevel", "error", "-i"]);
     cmd.arg(input);
 
+    if !keep_metadata {
+        cmd.args(["-map_metadata", "-1"]);
+    }
+
     match out_fmt {
-        "OPUS" => { cmd.args(["-c:a", "libopus", "-b:a", "128k"]); }
-        "AAC" | "M4A" => { cmd.args(["-c:a", "aac", "-b:a", "192k"]); }
+        "OPUS" => { 
+            let br = match quality { Quality::High => "128k", Quality::Medium => "96k", Quality::Low => "64k" };
+            cmd.args(["-c:a", "libopus", "-b:a", br]); 
+        }
+        "AAC" | "M4A" => { 
+            let br = match quality { Quality::High => "256k", Quality::Medium => "192k", Quality::Low => "128k" };
+            cmd.args(["-c:a", "aac", "-b:a", br]); 
+        }
         "FLAC" => { cmd.args(["-c:a", "flac"]); }
-        "OGG" => { cmd.args(["-c:a", "libvorbis", "-q:a", "6"]); }
-        "MP3" => { cmd.args(["-c:a", "libmp3lame", "-q:a", "2"]); }
-        "WMA" => { cmd.args(["-c:a", "wmav2", "-b:a", "192k"]); }
+        "OGG" => { 
+            let q = match quality { Quality::High => "6", Quality::Medium => "4", Quality::Low => "2" };
+            cmd.args(["-c:a", "libvorbis", "-q:a", q]); 
+        }
+        "MP3" => { 
+            let q = match quality { Quality::High => "0", Quality::Medium => "2", Quality::Low => "4" };
+            cmd.args(["-c:a", "libmp3lame", "-q:a", q]); 
+        }
+        "WMA" => { 
+            let br = match quality { Quality::High => "192k", Quality::Medium => "128k", Quality::Low => "96k" };
+            cmd.args(["-c:a", "wmav2", "-b:a", br]); 
+        }
         "WAV" | "AIFF" => {}
         _ => { cmd.args(["-q:a", "0"]); }
     }
@@ -126,7 +145,7 @@ fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Quality, s
     match out_fmt {
         "WEBM" => {
             cmd.args([
-                "-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0",
+                "-c:v", "libvpx-vp9", "-crf", crf, "-b:v", "0",
                 "-threads", &threads,
                 "-c:a", "libopus",
             ]);
@@ -189,10 +208,10 @@ fn convert_image(input: &Path, output: &Path, out_fmt: &str, quality: Quality, s
     };
 
     match out_fmt {
-        "JPEG" => { cmd.args(["-quality", "85", "-sampling-factor", "4:2:0", "-strip"]); }
-        "PNG" => { cmd.args(["-strip"]); }
-        "WEBP" => { cmd.args(["-quality", "80"]); }
-        "AVIF" => { cmd.args(["-quality", "60"]); }
+        "JPEG" => { cmd.args(["-quality", q_val, "-sampling-factor", "4:2:0"]); }
+        "PNG" => { cmd.args(["-quality", q_val]); }
+        "WEBP" => { cmd.args(["-quality", q_val]); }
+        "AVIF" => { cmd.args(["-quality", q_val]); }
         "TIFF" => { cmd.args(["-compress", "lzw"]); }
         _ => {}
     }

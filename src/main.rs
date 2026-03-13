@@ -293,10 +293,10 @@ fn run_crunch(cli: &Cli) -> Result<()> {
             max_file_size: max_size,
             conflict_strategy: cfg.conflict_strategy,
             normalize_audio: s.normalize_audio,
-            quality: crate::processor::Quality::High,
-            keep_metadata: true,
-            video_scale: crate::processor::VideoScale::Original,
-            image_scale: crate::processor::ImageScale::Original,
+            quality: s.quality,
+            keep_metadata: s.keep_metadata,
+            video_scale: s.video_scale,
+            image_scale: s.image_scale,
         })?;
         summaries.push(summary);
     }
