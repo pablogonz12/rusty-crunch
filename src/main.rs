@@ -195,12 +195,39 @@ fn run_crunch(cli: &Cli) -> Result<()> {
             }
         }
 
-        // "All Lossless Audio → FLAC" batch shortcut
+        // "All Lossless Audio → FLAC" and "All Lossy Audio → OPUS" batch shortcuts
         if raw_input == formats::LOSSLESS_AUDIO_SENTINEL {
+            let quality = prompt::select_quality().unwrap_or(crate::processor::Quality::High);
+            let keep_metadata = prompt::confirm_keep_metadata().unwrap_or(true);
             for &fmt in formats::LOSSLESS_AUDIO_INPUTS {
-                specs.push(JobSpec { media: formats::MediaType::Audio, input_fmt: fmt, output_fmt: "FLAC", normalize_audio, quality: prompt::select_quality().unwrap_or(crate::processor::Quality::High), keep_metadata: prompt::confirm_keep_metadata().unwrap_or(true), video_scale: crate::processor::VideoScale::Original, image_scale: crate::processor::ImageScale::Original });
+                specs.push(JobSpec {
+                    media: formats::MediaType::Audio,
+                    input_fmt: fmt,
+                    output_fmt: "FLAC",
+                    normalize_audio,
+                    quality,
+                    keep_metadata,
+                    video_scale: crate::processor::VideoScale::Original,
+                    image_scale: crate::processor::ImageScale::Original,
+                });
             }
             ack("Added", &format!("{} → FLAC", formats::LOSSLESS_AUDIO_INPUTS.join("/")));
+        } else if raw_input == formats::LOSSY_AUDIO_SENTINEL {
+            let quality = prompt::select_quality().unwrap_or(crate::processor::Quality::High);
+            let keep_metadata = prompt::confirm_keep_metadata().unwrap_or(true);
+            for &fmt in formats::LOSSY_AUDIO_INPUTS {
+                specs.push(JobSpec {
+                    media: formats::MediaType::Audio,
+                    input_fmt: fmt,
+                    output_fmt: "OPUS",
+                    normalize_audio,
+                    quality,
+                    keep_metadata,
+                    video_scale: crate::processor::VideoScale::Original,
+                    image_scale: crate::processor::ImageScale::Original,
+                });
+            }
+            ack("Added", &format!("{} → OPUS", formats::LOSSY_AUDIO_INPUTS.join("/")));
         } else {
             let output_fmt = 'pick_out: loop {
                 match prompt::select_output_format(media, raw_input)? {

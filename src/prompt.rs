@@ -47,25 +47,27 @@ pub fn select_media_type() -> Result<Option<MediaType>> {
 pub fn select_input_format(media: MediaType) -> Result<Option<&'static str>> {
     let fmts = media.formats();
 
-    // For Audio: prepend a "All Lossless → FLAC" shortcut
+    // For Audio: prepend a "All Lossless → FLAC" shortcut and "All Lossy → OPUS" shortcut
     let has_lossless = media == MediaType::Audio;
-    let mut items: Vec<&str> = Vec::with_capacity(fmts.len() + 1);
+    let mut items: Vec<&str> = Vec::with_capacity(fmts.len() + if has_lossless { 2 } else { 0 });
     if has_lossless {
         items.push("★ All Lossless (WAV/AIFF \u{2192} FLAC)");
+        items.push("★ All Lossy (MP3/OGG/etc \u{2192} OPUS)");
     }
     items.extend_from_slice(fmts);
 
     let idx = Select::with_theme(&theme())
         .with_prompt("Select the input format  (Esc to go back)")
         .items(&items)
-        .default(if has_lossless { 1 } else { 0 })
+        .default(if has_lossless { 2 } else { 0 })
         .interact_opt()?;
 
     match idx {
         None => Ok(None),
         Some(0) if has_lossless => Ok(Some(formats::LOSSLESS_AUDIO_SENTINEL)),
+        Some(1) if has_lossless => Ok(Some(formats::LOSSY_AUDIO_SENTINEL)),
         Some(i) => {
-            let offset = if has_lossless { 1 } else { 0 };
+            let offset = if has_lossless { 2 } else { 0 };
             Ok(Some(fmts[i - offset]))
         }
     }

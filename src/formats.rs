@@ -144,6 +144,9 @@ pub const LOSSLESS_AUDIO_SENTINEL: &str = "ALL_LOSSLESS_AUDIO";
 /// The input formats that map to the lossless-to-FLAC batch conversion.
 pub const LOSSLESS_AUDIO_INPUTS: &[&str] = &["WAV", "AIFF"];
 
+pub const LOSSY_AUDIO_SENTINEL: &str = "ALL_LOSSY_AUDIO";
+pub const LOSSY_AUDIO_INPUTS: &[&str] = &["MP3", "OGG", "AAC", "M4A", "WMA"];
+
 impl std::fmt::Display for MediaType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.label())
@@ -156,8 +159,6 @@ pub fn recommended_conversions() -> &'static [(MediaType, &'static str, &'static
     &[
         // Audio: lossless → FLAC
         (MediaType::Audio, "WAV", "FLAC"),
-        (MediaType::Audio, "AIFF", "FLAC"),
-        (MediaType::Audio, "AIFF", "FLAC"),
         (MediaType::Audio, "AIFF", "FLAC"),
         // Audio: lossy → OPUS
         (MediaType::Audio, "MP3", "OPUS"),
