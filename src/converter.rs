@@ -13,6 +13,8 @@ static LO_LOCK: Mutex<()> = Mutex::new(());
 /// Run an external command, suppress stdout/stderr, and return a nice error on failure.
 async fn run(cmd: &mut Command, ctx: &str) -> Result<()> {
     let output = cmd
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output().await
@@ -59,7 +61,8 @@ pub async fn convert(
 // ── Audio ──────────────────────────────────────────────────────────────
 
 async fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_audio: bool, quality: Quality, keep_metadata: bool) -> Result<()> {
-    let mut cmd = Command::new("ffmpeg");
+    let ffmpeg = util::ffmpeg_command();
+    let mut cmd = Command::new(&ffmpeg);
     cmd.args(["-hide_banner", "-loglevel", "error", "-i"]);
     cmd.arg(input);
 
@@ -105,7 +108,7 @@ async fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_aud
     };
 
     cmd.arg("-y").arg(&final_output);
-    let res = run(&mut cmd, "ffmpeg").await;
+    let res = run(&mut cmd, ffmpeg.as_str()).await;
 
     if is_inplace {
         if res.is_ok() {
@@ -121,19 +124,126 @@ async fn convert_audio(input: &Path, output: &Path, out_fmt: &str, normalize_aud
 // ── Video ──────────────────────────────────────────────────────────────
 
 async fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Quality, scale: VideoScale, keep_metadata: bool) -> Result<()> {
-    let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-hide_banner", "-loglevel", "error", "-i"]);
-    cmd.arg(input);
+    let best_enc = util::best_h264_encoder();
+    let res = build_and_run_video(input, output, out_fmt, quality, scale, keep_metadata, best_enc).await;
+    
+    if res.is_err() && best_enc.name != "libx264" && best_enc.name != "libopenh264" {
+        eprintln!("  \n\033[33m⚠ Hardware encoder '{}' failed. Falling back to CPU...\033[0m", best_enc.name);
+        let sw_enc = util::software_h264_encoder();
+        return build_and_run_video(input, output, out_fmt, quality, scale, keep_metadata, sw_enc).await;
+    }
+    
+    res
+}
+
+async fn build_and_run_video(input: &Path, output: &Path, out_fmt: &str, quality: Quality, scale: VideoScale, keep_metadata: bool, enc: &util::H264Encoder) -> Result<()> {
+    let use_vaapi = (out_fmt == "MKV" || out_fmt == "MP4" || out_fmt == "TS") && enc.name.ends_with("vaapi");
+    let threads_str = "0".to_string();
+
+    let ffmpeg = util::ffmpeg_command();
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.args(["-hide_banner", "-loglevel", "error"]);
+    cmd.args(["-threads", &threads_str, "-filter_threads", &threads_str]);
+    if use_vaapi {
+        cmd.args(["-vaapi_device", "/dev/dri/renderD128"]);
+        cmd.args(["-hwaccel", "vaapi", "-hwaccel_device", "/dev/dri/renderD128", "-hwaccel_output_format", "vaapi"]);
+    }
+    cmd.args(["-i"]).arg(input);
+
+    // Preserve primary video plus all audio/subtitle streams.
+    cmd.args(["-map", "0:v:0", "-map", "0:a?", "-map", "0:s?"]);
 
     if !keep_metadata {
         cmd.args(["-map_metadata", "-1"]);
     }
 
+    let mut scale_filter: Option<String> = None;
+    
+
     match scale {
-        VideoScale::P1080 => { cmd.args(["-vf", "scale=-2:1080"]); }
-        VideoScale::P720 => { cmd.args(["-vf", "scale=-2:720"]); }
+        VideoScale::P1080 => {
+            scale_filter = Some("scale=-2:1080".to_string());
+        }
+        VideoScale::P720 => {
+            scale_filter = Some("scale=-2:720".to_string());
+        }
+        VideoScale::AutoTarget { target_height, preset } => {
+            let flags = match preset {
+                crate::processor::UpscalePreset::Anime => "spline",
+                crate::processor::UpscalePreset::Movie => "lanczos",
+            };
+
+            if let Some((w, h)) = probe_video_dimensions(input).await {
+                let h_u32 = h.max(1);
+                let mult = if h_u32 >= target_height {
+                    1_u32
+                } else {
+                    target_height.div_ceil(h_u32).clamp(2, 4)
+                };
+
+                if mult > 1 {
+                    
+                    let tw = ((w as u64).saturating_mul(mult as u64) / 2) * 2;
+                    let th = ((h as u64).saturating_mul(mult as u64) / 2) * 2;
+                    if tw >= 2 && th >= 2 {
+                        scale_filter = Some(format!("scale={tw}:{th}:flags={flags}"));
+                    } else {
+                        scale_filter = Some(format!("scale=trunc(iw*{mult}/2)*2:trunc(ih*{mult}/2)*2:flags={flags}"));
+                    }
+                }
+            } else {
+                scale_filter = Some(format!("scale=-2:{target_height}:flags={flags}"));
+            }
+        }
+        VideoScale::Upscale2xAnime | VideoScale::Upscale3xAnime | VideoScale::Upscale4xAnime |
+        VideoScale::Upscale2xMovie | VideoScale::Upscale3xMovie | VideoScale::Upscale4xMovie => {
+            let (mult, flags) = match scale {
+                VideoScale::Upscale2xAnime => (2_u64, "spline"),
+                VideoScale::Upscale3xAnime => (3_u64, "spline"),
+                VideoScale::Upscale4xAnime => (4_u64, "spline"),
+                VideoScale::Upscale2xMovie => (2_u64, "lanczos"),
+                VideoScale::Upscale3xMovie => (3_u64, "lanczos"),
+                VideoScale::Upscale4xMovie => (4_u64, "lanczos"),
+                _ => unreachable!(),
+            };
+            
+            
+            if let Some((w, h)) = probe_video_dimensions(input).await {
+                let tw = ((w as u64).saturating_mul(mult) / 2) * 2;
+                let th = ((h as u64).saturating_mul(mult) / 2) * 2;
+                if tw >= 2 && th >= 2 {
+                    scale_filter = Some(format!("scale={tw}:{th}:flags={flags}"));
+                } else {
+                    scale_filter = Some(format!("scale=trunc(iw*{mult}/2)*2:trunc(ih*{mult}/2)*2:flags={flags}"));
+                }
+            } else {
+                scale_filter = Some(format!("scale=trunc(iw*{mult}/2)*2:trunc(ih*{mult}/2)*2:flags={flags}"));
+            }
+        }
         VideoScale::Original => {}
     }
+
+    if use_vaapi {
+        if let Some(filter) = scale_filter.clone() {
+            if filter.contains("scale=") {
+                let dims = filter.split(':').take(2).collect::<Vec<_>>();
+                if dims.len() >= 2 && dims[0].starts_with("scale=") {
+                    let w = dims[0].replace("scale=", "");
+                    let h = dims[1];
+                    scale_filter = Some(format!("scale_vaapi=w={}:h={}", w, h));
+                } else {
+                    scale_filter = None;
+                }
+            } else {
+                scale_filter = None;
+            }
+        }
+    }
+
+    if let Some(filter) = &scale_filter {
+        cmd.args(["-vf", filter]);
+    }
+
 
     let crf = match quality {
         Quality::High => "18",
@@ -141,7 +251,7 @@ async fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Qual
         Quality::Low => "28",
     };
 
-    let threads = util::cores().to_string();
+    let threads = threads_str.clone();
 
     match out_fmt {
         "WEBM" => {
@@ -166,7 +276,6 @@ async fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Qual
             ]);
         }
         "TS" => {
-            let enc = util::best_h264_encoder();
             cmd.args(["-c:v", enc.name]);
             match enc.name {
                 "h264_videotoolbox" => {
@@ -186,11 +295,10 @@ async fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Qual
                 }
                 _ => { cmd.args(enc.quality_args); }
             }
-            cmd.args(["-threads", &threads, "-c:a", "aac"]);
+            cmd.args(["-threads", &threads, "-c:a", "copy", "-c:s", "copy"]);
         }
         _ => {
             // MP4/MKV/MOV/FLV — try hardware-accelerated H.264, fall back to libx264
-            let enc = util::best_h264_encoder();
             cmd.args(["-c:v", enc.name]);
             match enc.name {
                 "h264_videotoolbox" => {
@@ -210,13 +318,12 @@ async fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Qual
                 }
                 _ => { cmd.args(enc.quality_args); }
             }
-            let a_br = match quality { Quality::High => "256k", Quality::Medium => "192k", Quality::Low => "128k" };
-            cmd.args(["-threads", &threads, "-c:a", "aac", "-b:a", a_br]);
+            cmd.args(["-threads", &threads, "-c:a", "copy", "-c:s", "copy"]);
         }
     }
 
     cmd.arg("-y").arg(output);
-    run(&mut cmd, "ffmpeg").await
+    run(&mut cmd, ffmpeg.as_str()).await
 }
 
 // ── Images ─────────────────────────────────────────────────────────────
@@ -224,7 +331,7 @@ async fn convert_video(input: &Path, output: &Path, out_fmt: &str, quality: Qual
 async fn convert_image(input: &Path, output: &Path, out_fmt: &str, quality: Quality, scale: ImageScale, keep_metadata: bool) -> Result<()> {
     let bin = util::magick_command();
 
-    let mut cmd = Command::new(bin);
+    let mut cmd = Command::new(&bin);
     cmd.arg(input);
 
     if !keep_metadata {
@@ -253,7 +360,7 @@ async fn convert_image(input: &Path, output: &Path, out_fmt: &str, quality: Qual
     }
 
     cmd.arg(output);
-    run(&mut cmd, bin).await
+    run(&mut cmd, bin.as_str()).await
 }
 
 // ── Documents ──────────────────────────────────────────────────────────
@@ -288,22 +395,31 @@ async fn convert_document(input: &Path, output: &Path, in_fmt: &str, out_fmt: &s
     let _guard = LO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let out_dir = output.parent().unwrap_or(Path::new("."));
     let lo = util::lo_command();
-    let mut cmd = Command::new(lo);
+    let mut cmd = Command::new(&lo);
     cmd.args(["--headless", "--convert-to"]);
     cmd.arg(out_fmt.to_lowercase());
     cmd.arg("--outdir").arg(out_dir);
     cmd.arg(input);
-    run(&mut cmd, lo).await
+    run(&mut cmd, lo.as_str()).await
 }
 
 /// Run Ghostscript PDF optimization. Writes to a temp file, then renames.
 /// If `skip_if_larger` is true, files that don't shrink are left untouched.
 async fn optimize_pdf(input: &Path, output: &Path, settings: &[&str], skip_if_larger: bool) -> Result<()> {
-    let tmp = output.with_extension("pdf.tmp");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let tmp_dir = std::env::temp_dir();
+    let proc_id = std::process::id();
+    let tmp_in = tmp_dir.join(format!("crunch_in_{}_{}.pdf.tmp", proc_id, now));
+    let tmp_out = tmp_dir.join(format!("crunch_out_{}_{}.pdf.tmp", proc_id, now));
+
     let input_size = input.metadata().map(|m| m.len()).unwrap_or(0);
 
+    // Ghostscript on Windows can have issues with unicode chars or paths > 260 chars.
+    // Copy the input to a clean temp path to avoid read errors.
+    std::fs::copy(input, &tmp_in)?;
+
     let gs = util::gs_command();
-    let mut cmd = Command::new(gs);
+    let mut cmd = Command::new(&gs);
     cmd.args([
         "-sDEVICE=pdfwrite",
         "-dCompatibilityLevel=1.4",
@@ -312,15 +428,26 @@ async fn optimize_pdf(input: &Path, output: &Path, settings: &[&str], skip_if_la
         "-dBATCH",
     ]);
     cmd.args(settings);
-    cmd.arg(format!("-sOutputFile={}", tmp.display()));
-    cmd.arg(input);
+    
+    // Writing to a clean path in %TEMP% avoids write errors.
+    cmd.arg(format!("-sOutputFile={}", tmp_out.display()));
+    cmd.arg(&tmp_in);
 
-    let result = run(&mut cmd, gs).await;
+    // Ghostscript can hang indefinitely on corrupted/complex PDFs. Add a generous 10-minute timeout.
+    let run_future = run(&mut cmd, gs.as_str());
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(600), run_future).await {
+        Ok(res) => res,
+        Err(_) => bail!("Ghostscript timed out after 10 minutes"),
+    };
+
+    // Always clean up the temp input file
+    let _ = std::fs::remove_file(&tmp_in);
+
     if result.is_ok() {
         if skip_if_larger && input_size > 0 {
-            let out_size = tmp.metadata().map(|m| m.len()).unwrap_or(0);
+            let out_size = tmp_out.metadata().map(|m| m.len()).unwrap_or(0);
             if out_size >= input_size {
-                let _ = std::fs::remove_file(&tmp);
+                let _ = std::fs::remove_file(&tmp_out);
                 // Leave original untouched; copy only if paths differ
                 if input != output {
                     std::fs::copy(input, output)?;
@@ -328,9 +455,38 @@ async fn optimize_pdf(input: &Path, output: &Path, settings: &[&str], skip_if_la
                 return Ok(());
             }
         }
-        std::fs::rename(&tmp, output)?;
+        std::fs::copy(&tmp_out, output)?;
+        let _ = std::fs::remove_file(&tmp_out);
     } else {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&tmp_out);
     }
     result
+}
+
+async fn probe_video_dimensions(input: &Path) -> Option<(u32, u32)> {
+    let ffprobe = util::ffprobe_command();
+    let output = Command::new(ffprobe)
+        .args([
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=s=x:p=0",
+        ])
+        .arg(input)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()?;
+
+    let s = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = s.trim().split('x').collect();
+    if parts.len() == 2 {
+        let w = parts[0].parse::<u32>().ok()?;
+        let h = parts[1].parse::<u32>().ok()?;
+        Some((w, h))
+    } else {
+        None
+    }
 }

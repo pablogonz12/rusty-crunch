@@ -19,7 +19,21 @@ use walkdir::WalkDir;
 pub enum Quality { High, Medium, Low }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum VideoScale { Original, P1080, P720 }
+pub enum UpscalePreset { Anime, Movie }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VideoScale {
+    Original,
+    P1080,
+    P720,
+    AutoTarget { target_height: u32, preset: UpscalePreset },
+    Upscale2xAnime,
+    Upscale3xAnime,
+    Upscale4xAnime,
+    Upscale2xMovie,
+    Upscale3xMovie,
+    Upscale4xMovie,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ImageScale { Original, W1920, W1080 }
@@ -45,6 +59,8 @@ pub struct Job<'a> {
     pub min_file_size: Option<u64>,
     /// Optional: maximum file size in bytes (for filtering). None = no maximum.
     pub max_file_size: Option<u64>,
+    /// Whether to force re-processing of previously optimized files.
+    pub force_recheck: bool,
     /// What to do if the output file already exists.
     pub conflict_strategy: crate::config::ConflictStrategy,
 }
@@ -83,9 +99,17 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
     // ── Load optimization cache (for same-extension jobs like PDF → PDF) ──
     let cache = Mutex::new(if same_ext { load_opt_cache() } else { HashMap::new() });
 
+    // Session history for restore/undo functionality.
+    let session_id = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let history_entries = Mutex::new(Vec::<HistoryEntry>::new());
+    let backup_counter = AtomicUsize::new(0);
+
     // ── Collect matching files ──────────────────────────────────────
     let max_depth = if job.recursive { usize::MAX } else { 1 };
-    let files: Vec<PathBuf> = WalkDir::new(job.folder)
+    let mut files: Vec<PathBuf> = WalkDir::new(job.folder)
         .max_depth(max_depth)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -127,6 +151,8 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
         })
         .map(|e| e.into_path())
         .collect();
+
+    files.sort();
 
     if files.is_empty() {
         println!(
@@ -192,13 +218,25 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
         });
     }
 
+    let actual_threads = if job.media_type == MediaType::Video {
+        // Keep video parallelism intentionally low to avoid VRAM thrashing.
+        job.threads.max(1).min(2)
+    } else {
+        job.threads.max(1)
+    };
+
+    let mode_str = format!(
+        "{} parallel thread{}",
+        actual_threads,
+        if actual_threads == 1 { "" } else { "s" }
+    );
+
     println!(
-        "\n  {} Found {} file{} · using {} thread{}",
+        "\n  {} Found {} file{} · processing {}",
         style("⚡").cyan(),
         style(total).cyan().bold(),
         if total == 1 { "" } else { "s" },
-        style(job.threads).cyan().bold(),
-        if job.threads == 1 { "" } else { "s" },
+        style(mode_str).cyan().bold(),
     );
 
     // ── Progress bar with ETA ───────────────────────────────────────
@@ -221,15 +259,15 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
     let worst_ratio = AtomicU64::new(10000); // 100% = no savings (worst possible)
     let start = Instant::now();
 
-    // Build a local rayon thread pool limited to job.threads
+    // Build a local rayon thread pool limited to actual_threads
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(job.threads.max(1))
+        .worker_threads(actual_threads)
         .enable_all()
         .build()
         .unwrap();
 
     rt.block_on(async {
-        futures::stream::iter(files).for_each_concurrent(job.threads.max(1), |input_path| {
+        futures::stream::iter(files).for_each_concurrent(actual_threads, |input_path| {
             let output_ext = output_ext.clone();
             let pb = pb.clone();
             let cache = &cache;
@@ -240,6 +278,9 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
             let saved_bytes = &saved_bytes;
             let best_ratio = &best_ratio;
             let worst_ratio = &worst_ratio;
+            let history_entries = &history_entries;
+            let backup_counter = &backup_counter;
+            let session_id = session_id;
             async move {
         // Compute output path (respects optional sub-folder and preserves relative structure)
         let output_path = if let Some(sub) = job.output_subfolder {
@@ -281,9 +322,19 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
 
         let mut final_output_path = output_path;
 
-        // Handle conflicts if output already exists (not for in-place optimization)
-        if !same_ext && final_output_path.exists() {
-            match job.conflict_strategy {
+        let is_inplace_intent = same_ext && final_output_path == input_path && job.delete_originals;
+
+        // Handle conflicts if output already exists (unless it's an intended in-place replacement)
+        if !is_inplace_intent && final_output_path.exists() {
+            // For same extension workflows (like MKV->MKV upscale), if the output exactly equals the input
+            // but we aren't doing in-place replacement, we MUST force a rename so we don't accidentally skip or overwrite the source.
+            let strategy = if same_ext && final_output_path == input_path {
+                crate::config::ConflictStrategy::Rename
+            } else {
+                job.conflict_strategy
+            };
+
+            match strategy {
                 crate::config::ConflictStrategy::Skip => {
                     skip_count.fetch_add(1, Ordering::Relaxed);
                     pb.inc(1);
@@ -310,7 +361,7 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
         }
 
         // Skip files already optimized (same-extension jobs like PDF → PDF)
-        if same_ext {
+        if same_ext && !job.force_recheck {
             if let Some(entry) = cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -369,10 +420,26 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
                     }
                 }
 
+                let mut backup_path: Option<PathBuf> = None;
                 if job.delete_originals && !same_ext {
-                    if std::fs::remove_file(&input_path).is_err() {
-                        del_err_count.fetch_add(1, Ordering::Relaxed);
+                    let idx = backup_counter.fetch_add(1, Ordering::Relaxed);
+                    match backup_original_for_restore(&input_path, session_id, idx) {
+                        Ok(p) => backup_path = Some(p),
+                        Err(_) => {
+                            del_err_count.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
+                }
+
+                if !same_ext {
+                    history_entries
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(HistoryEntry {
+                            original_path: input_path.clone(),
+                            converted_path: final_output_path.clone(),
+                            backup_path,
+                        });
                 }
 
                 // Record file state so we skip it on future runs
@@ -419,6 +486,19 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
         save_opt_cache(&cache);
     }
 
+    // Persist history only when there are actual conversion entries.
+    let entries = match history_entries.into_inner() {
+        Ok(v) => v,
+        Err(p) => p.into_inner(),
+    };
+    if !entries.is_empty() {
+        let _ = save_history_record(&HistoryRecord {
+            session_id,
+            created_unix: session_id,
+            entries,
+        });
+    }
+
     // ── Summary ─────────────────────────────────────────────────────
     let elapsed = start.elapsed();
     let ok = ok_count.load(Ordering::Relaxed);
@@ -463,13 +543,21 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
             worst as f64 / 100.0,
         );
     }
-    println!(
-        "  {} Finished in {:.1}s using {} thread{}",
-        style("┃").dim(),
-        elapsed.as_secs_f64(),
-        job.threads,
-        if job.threads == 1 { "" } else { "s" },
-    );
+    if job.media_type == MediaType::Video {
+        println!(
+            "  {} Finished in {:.1}s (processed sequentially)",
+            style("┃").dim(),
+            elapsed.as_secs_f64(),
+        );
+    } else {
+        println!(
+            "  {} Finished in {:.1}s using {} parallel thread{}",
+            style("┃").dim(),
+            elapsed.as_secs_f64(),
+            actual_threads,
+            if actual_threads == 1 { "" } else { "s" },
+        );
+    }
     println!("  {}", style("─".repeat(50)).dim());
 
     Ok(ConversionSummary {
@@ -486,6 +574,123 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
         compression_best_percent: best as f64 / 100.0,
         compression_worst_percent: if worst == 10000 { 0.0 } else { worst as f64 / 100.0 },
     })
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct HistoryEntry {
+    original_path: PathBuf,
+    converted_path: PathBuf,
+    backup_path: Option<PathBuf>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct HistoryRecord {
+    session_id: u64,
+    created_unix: u64,
+    entries: Vec<HistoryEntry>,
+}
+
+fn history_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("rusty-crunch")
+        .join("history")
+}
+
+fn history_file_path(session_id: u64) -> PathBuf {
+    history_dir().join(format!("session_{session_id}.json"))
+}
+
+fn latest_history_file() -> Option<PathBuf> {
+    let dir = history_dir();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .collect();
+    files.sort();
+    files.pop()
+}
+
+fn save_history_record(record: &HistoryRecord) -> Result<()> {
+    let path = history_file_path(record.session_id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string_pretty(record)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+fn move_file_cross_fs(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if std::fs::rename(src, dst).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(src, dst)?;
+    std::fs::remove_file(src)?;
+    Ok(())
+}
+
+fn backup_original_for_restore(original: &Path, session_id: u64, idx: usize) -> Result<PathBuf> {
+    let file_name = original
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let dst = history_dir()
+        .join("backups")
+        .join(format!("session_{session_id}"))
+        .join(format!("{idx:06}_{file_name}"));
+    move_file_cross_fs(original, &dst)?;
+    Ok(dst)
+}
+
+pub fn restore_last_session() -> Result<()> {
+    let Some(path) = latest_history_file() else {
+        println!("\n  {} No previous conversion history found.", style("⚠").yellow());
+        return Ok(());
+    };
+
+    let json = std::fs::read_to_string(&path)?;
+    let record: HistoryRecord = serde_json::from_str(&json)?;
+
+    let mut restored_originals = 0usize;
+    let mut removed_outputs = 0usize;
+    let mut failures = 0usize;
+
+    for entry in record.entries.iter().rev() {
+        if entry.converted_path.exists() {
+            if std::fs::remove_file(&entry.converted_path).is_ok() {
+                removed_outputs += 1;
+            } else {
+                failures += 1;
+            }
+        }
+
+        if let Some(backup) = &entry.backup_path {
+            if backup.exists() && !entry.original_path.exists() {
+                if move_file_cross_fs(backup, &entry.original_path).is_ok() {
+                    restored_originals += 1;
+                } else {
+                    failures += 1;
+                }
+            }
+        }
+    }
+
+    println!(
+        "\n  {} Restore complete: {} original(s) restored, {} converted file(s) removed, {} issue(s).",
+        style("✔").green().bold(),
+        style(restored_originals).cyan().bold(),
+        style(removed_outputs).cyan().bold(),
+        style(failures).yellow().bold(),
+    );
+
+    Ok(())
 }
 
 // ── Disk space check ────────────────────────────────────────────────
@@ -825,3 +1030,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

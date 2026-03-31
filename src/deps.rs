@@ -133,12 +133,149 @@ fn run_install(pm_cmd: &str, pkg: &str) -> Result<bool> {
     Ok(status.success())
 }
 
+#[cfg(target_os = "windows")]
+fn run_pm(program: &str, args: &[&str]) -> Result<bool> {
+    for attempt in 1..=2 {
+        let status = Command::new(program)
+            .args(args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?;
+        if status.success() {
+            return Ok(true);
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "windows")]
+fn winget_ids(tool: &str) -> &'static [&'static str] {
+    match tool {
+        "ffmpeg" => &["Gyan.FFmpeg", "BtbN.FFmpeg"],
+        "magick" => &["ImageMagick.ImageMagick"],
+        // Ghostscript IDs have changed across catalogs; try known variants.
+        "gs" => &[
+            "ArtifexSoftware.GhostScript",
+            "GPLGhostscript.Ghostscript",
+            "Ghostscript.Ghostscript",
+        ],
+        "libreoffice" => &["TheDocumentFoundation.LibreOffice"],
+        _ => &[],
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn choco_name(tool: &str) -> &str {
+    match tool {
+        "ffmpeg" => "ffmpeg",
+        "magick" => "imagemagick",
+        "gs" => "ghostscript",
+        "libreoffice" => "libreoffice-fresh",
+        _ => tool,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn scoop_name(tool: &str) -> &str {
+    match tool {
+        "ffmpeg" => "ffmpeg",
+        "magick" => "imagemagick",
+        "gs" => "ghostscript",
+        "libreoffice" => "libreoffice",
+        _ => tool,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn install_tool_windows(tool: &str) -> Result<bool> {
+    if util::has("winget") {
+        for id in winget_ids(tool) {
+            println!(
+                "  {} Trying winget package {} …",
+                style("·").dim(),
+                style(id).dim(),
+            );
+            if run_pm(
+                "winget",
+                &[
+                    "install",
+                    "--id",
+                    id,
+                    "-e",
+                    "--accept-source-agreements",
+                    "--accept-package-agreements",
+                ],
+            )? {
+                return Ok(true);
+            }
+        }
+    }
+
+    if util::has("choco") {
+        let pkg = choco_name(tool);
+        println!(
+            "  {} Trying choco package {} …",
+            style("·").dim(),
+            style(pkg).dim(),
+        );
+        if run_pm("choco", &["install", "-y", pkg])? {
+            return Ok(true);
+        }
+    }
+
+    if util::has("scoop") {
+        let pkg = scoop_name(tool);
+        println!(
+            "  {} Trying scoop package {} …",
+            style("·").dim(),
+            style(pkg).dim(),
+        );
+        if run_pm("scoop", &["install", pkg])? {
+            return Ok(true);
+        }
+    }
+
+    if tool == "gs" {
+        println!(
+            "  {} Falling back to Ghostscript direct download …",
+            style("·").dim()
+        );
+        let script = r#"
+$ErrorActionPreference = 'Stop'
+Write-Host "Fetching latest Ghostscript release..."
+$r = Invoke-RestMethod 'https://api.github.com/repos/ArtifexSoftware/ghostpdl-downloads/releases/latest'
+$asset = $r.assets | Where-Object { $_.name -match 'gs\d+w64\.exe' } | Select-Object -First 1
+if (-not $asset) { throw "Could not find Ghostscript w64 installer." }
+$installer = Join-Path $env:TEMP $asset.name
+Write-Host "Downloading $($asset.browser_download_url)..."
+Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $installer
+Write-Host "Installing Ghostscript..."
+Start-Process -FilePath $installer -ArgumentList '/S' -Wait -Verb RunAs
+"#;
+        let status = Command::new("powershell")
+            .args(&["-NoProfile", "-Command", script])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?;
+        if status.success() {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 /// Check that all tools needed for `media` are present.
 /// If any are missing, attempt an automatic install via the system package manager.
 pub fn ensure(media: MediaType) -> Result<()> {
     // Build the list of missing tools using platform-aware detection.
     // Keys here are logical names for the package-map lookup, not binary names.
-    let missing: Vec<&str> = match media {
+    let missing: Vec<&'static str> = match media {
         MediaType::Audio | MediaType::Video => {
             if util::has("ffmpeg") { vec![] } else { vec!["ffmpeg"] }
         }
@@ -158,40 +295,90 @@ pub fn ensure(media: MediaType) -> Result<()> {
         return Ok(());
     }
 
-    let (pm_cmd, pkg_fn) = match detect_pm() {
-        Some(pm) => pm,
-        None => {
+    #[cfg(target_os = "windows")]
+    {
+        if !util::has("winget") && !util::has("choco") && !util::has("scoop") {
             let names: Vec<&str> = missing.iter().copied().collect();
             bail!(
-                "Missing tools: {}. No supported package manager found — please install them manually.",
+                "Missing tools: {}. No supported package manager found on Windows (winget/choco/scoop).",
                 names.join(", ")
             );
         }
-    };
 
-    for tool in &missing {
-        let pkg = pkg_fn(tool);
-        println!(
-            "  {} Installing {} …",
-            style("📦").cyan(),
-            style(pkg).white().bold(),
-        );
+        for tool in &missing {
+            let label = match *tool {
+                "ffmpeg" => "FFmpeg",
+                "magick" => "ImageMagick",
+                "gs" => "Ghostscript",
+                "libreoffice" => "LibreOffice",
+                _ => tool,
+            };
 
-        let full = format!("{pm_cmd} {pkg}");
-        if !run_install(pm_cmd, pkg)? {
-            bail!(
-                "Failed to install `{pkg}`. Try running manually:\n  {full}"
+            println!(
+                "  {} Installing {} …",
+                style("📦").cyan(),
+                style(label).white().bold(),
+            );
+
+            if !install_tool_windows(tool)? {
+                if *tool == "gs" {
+                    bail!(
+                        "Could not auto-install Ghostscript. Install manually from:\n  https://ghostscript.com/releases/gsdnld.html"
+                    );
+                }
+                bail!(
+                    "Failed to auto-install {}. Try installing manually with winget/choco/scoop.",
+                    label
+                );
+            }
+
+            println!(
+                "  {} {} install command completed",
+                style("✓").green(),
+                style(label).white().bold(),
             );
         }
+    }
 
-        println!(
-            "  {} {} installed",
-            style("✓").green(),
-            style(pkg).white().bold(),
-        );
+    #[cfg(not(target_os = "windows"))]
+    {
+        let (pm_cmd, pkg_fn) = match detect_pm() {
+            Some(pm) => pm,
+            None => {
+                let names: Vec<&str> = missing.iter().copied().collect();
+                bail!(
+                    "Missing tools: {}. No supported package manager found — please install them manually.",
+                    names.join(", ")
+                );
+            }
+        };
+
+        for tool in &missing {
+            let pkg = pkg_fn(*tool);
+            println!(
+                "  {} Installing {} …",
+                style("📦").cyan(),
+                style(pkg).white().bold(),
+            );
+
+            let full = format!("{pm_cmd} {pkg}");
+            if !run_install(pm_cmd, pkg)? {
+                bail!(
+                    "Failed to install `{pkg}`. Try running manually:\n  {full}"
+                );
+            }
+
+            println!(
+                "  {} {} installed",
+                style("✓").green(),
+                style(pkg).white().bold(),
+            );
+        }
     }
 
     // Flush the lookup cache so freshly installed tools are detected
+    #[cfg(target_os = "windows")]
+    util::refresh_windows_process_path();
     util::clear_has_cache();
 
     // Verify after install
@@ -257,7 +444,7 @@ fn wait_for_enter() {
 /// Verify that tools for `media` are present without attempting auto-install.
 /// Used by the headless agent where interactive installation is not possible.
 pub fn check(media: MediaType) -> Result<()> {
-    let missing: Vec<&str> = match media {
+    let missing: Vec<&'static str> = match media {
         MediaType::Audio | MediaType::Video => {
             if util::has("ffmpeg") { vec![] } else { vec!["ffmpeg"] }
         }
@@ -422,3 +609,5 @@ pub fn clean_installed() -> Result<()> {
     println!();
     Ok(())
 }
+
+

@@ -58,14 +58,14 @@ impl MediaType {
                 _ => &[],
             },
             Self::Video => match input {
-                "AVI"  => &["MP4", "MKV", "WEBM"],
-                "MOV"  => &["MP4", "MKV", "WEBM"],
-                "FLV"  => &["MP4", "MKV", "WEBM"],
-                "WMV"  => &["MP4", "MKV", "WEBM"],
-                "TS"   => &["MP4", "MKV"],
-                "MP4"  => &["MKV", "WEBM"],
-                "MKV"  => &["MP4", "WEBM"],
-                "WEBM" => &["MP4", "MKV"],
+                "AVI"  => &["AVI", "MP4", "MKV", "WEBM"],
+                "MOV"  => &["MOV", "MP4", "MKV", "WEBM"],
+                "FLV"  => &["FLV", "MP4", "MKV", "WEBM"],
+                "WMV"  => &["WMV", "MP4", "MKV", "WEBM"],
+                "TS"   => &["TS", "MP4", "MKV"],
+                "MP4"  => &["MP4", "MKV", "WEBM"],
+                "MKV"  => &["MKV", "MP4", "WEBM"],
+                "WEBM" => &["WEBM", "MP4", "MKV"],
                 _ => &[],
             },
             Self::Images => match input {
@@ -259,10 +259,11 @@ mod tests {
         let video = MediaType::Video;
         assert!(video.compatible_outputs("MP4").contains(&"MKV"));
         assert!(video.compatible_outputs("MP4").contains(&"WEBM"));
-        assert!(!video.compatible_outputs("MP4").contains(&"MP4"));
+        assert!(video.compatible_outputs("MP4").contains(&"MP4"));
         
         assert!(video.compatible_outputs("AVI").contains(&"MP4"));
         assert!(video.compatible_outputs("AVI").contains(&"MKV"));
+        assert!(video.compatible_outputs("AVI").contains(&"AVI"));
         
         assert!(video.compatible_outputs("INVALID").is_empty());
     }

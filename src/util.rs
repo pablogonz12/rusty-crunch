@@ -3,6 +3,8 @@ use anyhow::{bail, Result};
 use anyhow::Context;
 use console::style;
 use serde_json::Value;
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
@@ -17,6 +19,23 @@ pub fn cores() -> usize {
 
 /// Module-level cache for `has()` lookups.
 static HAS_CACHE: OnceLock<Mutex<Vec<(String, bool)>>> = OnceLock::new();
+/// Cache for resolved command paths (or not found).
+static RESOLVE_CACHE: OnceLock<Mutex<Vec<(String, Option<String>)>>> = OnceLock::new();
+
+/// Resolve a command to an executable path or runnable command token.
+/// On success, returns either an absolute executable path or the command name.
+pub fn resolve_command(name: &str) -> Option<String> {
+    let cache = RESOLVE_CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+
+    if let Some((_, found)) = guard.iter().find(|(n, _)| n == name) {
+        return found.clone();
+    }
+
+    let found = resolve_command_uncached(name);
+    guard.push((name.to_string(), found.clone()));
+    found
+}
 
 /// Returns true if `name` is found in PATH (cached per unique name).
 pub fn has(name: &str) -> bool {
@@ -27,7 +46,7 @@ pub fn has(name: &str) -> bool {
         return entry.1;
     }
 
-    let found = has_uncached(name);
+    let found = resolve_command(name).is_some();
     guard.push((name.to_string(), found));
     found
 }
@@ -37,7 +56,38 @@ pub fn clear_has_cache() {
     if let Some(cache) = HAS_CACHE.get() {
         cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
+    if let Some(cache) = RESOLVE_CACHE.get() {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
 }
+
+/// On Windows, refresh this process PATH from Machine+User environment scopes.
+/// This helps detect tools immediately after winget/choco/scoop installs.
+#[cfg(target_os = "windows")]
+pub fn refresh_windows_process_path() {
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+
+    if let Ok(out) = output {
+        if out.status.success() {
+            let merged = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !merged.is_empty() {
+                std::env::set_var("PATH", merged);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn refresh_windows_process_path() {}
 
 /// Total threads to use for parallel processing, based on the configured thread mode.
 pub fn active_threads() -> usize {
@@ -192,19 +242,135 @@ pub fn download_and_install_update(version: &str) -> Result<()> {
     }
 }
 
-fn has_uncached(name: &str) -> bool {
+fn resolve_command_uncached(name: &str) -> Option<String> {
+    if let Some(p) = resolve_from_path(name) {
+        return Some(p);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(p) = resolve_windows_known_location(name) {
+            return Some(p);
+        }
+    }
+
+    None
+}
+
+fn resolve_from_path(name: &str) -> Option<String> {
     #[cfg(target_os = "windows")]
     let checker = "where";
     #[cfg(not(target_os = "windows"))]
     let checker = "which";
 
-    Command::new(checker)
+    let output = Command::new(checker)
         .arg(name)
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first = stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())?;
+    Some(first.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn program_files() -> Option<PathBuf> {
+    std::env::var_os("ProgramFiles").map(PathBuf::from)
+}
+
+#[cfg(target_os = "windows")]
+fn local_app_data() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+}
+
+#[cfg(target_os = "windows")]
+fn user_profile() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE").map(PathBuf::from)
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_known_location(name: &str) -> Option<String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Some(appdata) = local_app_data() {
+        candidates.push(appdata.join("Microsoft").join("WindowsApps").join(format!("{name}.exe")));
+    }
+
+    if let Some(home) = user_profile() {
+        let shims = home.join("scoop").join("shims");
+        candidates.push(shims.join(format!("{name}.exe")));
+        candidates.push(shims.join(format!("{name}.cmd")));
+    }
+
+    if let Some(pf) = program_files() {
+        match name {
+            "magick" => {
+                if let Ok(entries) = std::fs::read_dir(&pf) {
+                    for e in entries.flatten() {
+                        let p = e.path();
+                        if p.is_dir() {
+                            if let Some(n) = p.file_name().and_then(|s| s.to_str()) {
+                                if n.starts_with("ImageMagick-") {
+                                    candidates.push(p.join("magick.exe"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "soffice" | "libreoffice" => {
+                candidates.push(pf.join("LibreOffice").join("program").join("soffice.exe"));
+            }
+            "ffmpeg" => {
+                candidates.push(pf.join("ffmpeg").join("bin").join("ffmpeg.exe"));
+            }
+            "ffprobe" => {
+                candidates.push(pf.join("ffmpeg").join("bin").join("ffprobe.exe"));
+            }
+            "gswin64c" | "gswin32c" | "gs" => {
+                let gsroot = pf.join("gs");
+                if let Ok(entries) = std::fs::read_dir(gsroot) {
+                    for e in entries.flatten() {
+                        let p = e.path();
+                        if p.is_dir() {
+                            candidates.push(p.join("bin").join("gswin64c.exe"));
+                            candidates.push(p.join("bin").join("gswin32c.exe"));
+                            candidates.push(p.join("bin").join("gs.exe"));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
+    if let Some(pd) = program_data {
+        candidates.push(pd.join("chocolatey").join("bin").join(format!("{name}.exe")));
+        candidates.push(pd.join("chocolatey").join("bin").join(format!("{name}.bat")));
+    }
+
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().to_string())
+}
+
+pub fn ffmpeg_command() -> String {
+    resolve_command("ffmpeg").unwrap_or_else(|| "ffmpeg".to_string())
+}
+
+pub fn ffprobe_command() -> String {
+    resolve_command("ffprobe").unwrap_or_else(|| "ffprobe".to_string())
 }
 
 /// Detect the best H.264 encoder available in ffmpeg (cached).
@@ -213,6 +379,23 @@ fn has_uncached(name: &str) -> bool {
 pub fn best_h264_encoder() -> &'static H264Encoder {
     static ENCODER: OnceLock<H264Encoder> = OnceLock::new();
     ENCODER.get_or_init(detect_h264_encoder)
+}
+
+pub fn software_h264_encoder() -> &'static H264Encoder {
+    static SW_ENCODER: OnceLock<H264Encoder> = OnceLock::new();
+    SW_ENCODER.get_or_init(|| {
+        if probe_encoder("libx264", &[]) {
+            H264Encoder {
+                name: "libx264",
+                quality_args: &["-preset", "medium", "-crf", "23"],
+            }
+        } else {
+            H264Encoder {
+                name: "libopenh264",
+                quality_args: &[],
+            }
+        }
+    })
 }
 
 pub struct H264Encoder {
@@ -226,7 +409,7 @@ fn detect_h264_encoder() -> H264Encoder {
     // listed but fail at runtime (e.g. h264_nvenc without CUDA drivers).
 
     #[cfg(target_os = "macos")]
-    if probe_encoder("h264_videotoolbox") {
+    if probe_encoder("h264_videotoolbox", &[]) {
         return H264Encoder {
             name: "h264_videotoolbox",
             quality_args: &["-q:v", "65"],
@@ -235,22 +418,48 @@ fn detect_h264_encoder() -> H264Encoder {
 
     #[cfg(not(target_os = "macos"))]
     {
-        if probe_encoder("h264_nvenc") {
+        if probe_encoder("h264_nvenc", &[]) {
             return H264Encoder {
                 name: "h264_nvenc",
                 quality_args: &["-preset", "p4", "-crf", "23"],
             };
         }
 
-        if probe_encoder("h264_qsv") {
+        if probe_encoder("h264_qsv", &[]) {
             return H264Encoder {
                 name: "h264_qsv",
                 quality_args: &["-global_quality", "23"],
             };
         }
+
+        // Mesa compatible GPUs (AMD/Intel on Linux) via VAAPI.
+        let path = std::path::Path::new("/dev/dri/renderD128");
+        if path.exists() {
+            let va_args = ["-vaapi_device", "/dev/dri/renderD128", "-vf", "format=nv12,hwupload"];
+            if probe_encoder("h264_vaapi", &va_args) {
+                return H264Encoder {
+                    name: "h264_vaapi",
+                    quality_args: &["-global_quality:v", "23"],
+                };
+            }
+            // Fallback to other VAAPI codecs only if H.264 VAAPI is unavailable.
+            if probe_encoder("hevc_vaapi", &va_args) {
+                return H264Encoder {
+                    name: "hevc_vaapi",
+                    quality_args: &["-global_quality:v", "23"],
+                };
+            }
+            if probe_encoder("av1_vaapi", &va_args) {
+                return H264Encoder {
+                    name: "av1_vaapi",
+                    quality_args: &["-global_quality:v", "23"],
+                };
+            }
+        }
     }
 
-    if probe_encoder("libx264") {
+    // Try standard software encoder
+    if probe_encoder("libx264", &[]) {
         return H264Encoder {
             name: "libx264",
             quality_args: &["-preset", "medium", "-crf", "23"],
@@ -266,40 +475,45 @@ fn detect_h264_encoder() -> H264Encoder {
 
 /// Resolve the Ghostscript binary name for the current platform.
 /// On Windows, Ghostscript installs as `gswin64c` / `gswin32c`, not `gs`.
-pub fn gs_command() -> &'static str {
-    static CMD: OnceLock<&str> = OnceLock::new();
-    *CMD.get_or_init(|| {
-        if has("gs") { return "gs"; }
-        #[cfg(target_os = "windows")]
-        {
-            if has("gswin64c") { return "gswin64c"; }
-            if has("gswin32c") { return "gswin32c"; }
+pub fn gs_command() -> String {
+    if let Some(cmd) = resolve_command("gs") {
+        return cmd;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(cmd) = resolve_command("gswin64c") {
+            return cmd;
         }
-        "gs"
-    })
+        if let Some(cmd) = resolve_command("gswin32c") {
+            return cmd;
+        }
+    }
+    "gs".to_string()
 }
 
 /// Resolve the LibreOffice binary name.
 /// On Windows / some macOS installs the command is `soffice`, not `libreoffice`.
-pub fn lo_command() -> &'static str {
-    static CMD: OnceLock<&str> = OnceLock::new();
-    *CMD.get_or_init(|| {
-        if has("libreoffice") { return "libreoffice"; }
-        if has("soffice") { return "soffice"; }
-        "libreoffice"
-    })
+pub fn lo_command() -> String {
+    if let Some(cmd) = resolve_command("libreoffice") {
+        return cmd;
+    }
+    if let Some(cmd) = resolve_command("soffice") {
+        return cmd;
+    }
+    "libreoffice".to_string()
 }
 
 /// Resolve the ImageMagick binary name.
 /// On Windows, NEVER fall back to `convert` — that is a built-in disk utility.
-pub fn magick_command() -> &'static str {
-    static CMD: OnceLock<&str> = OnceLock::new();
-    *CMD.get_or_init(|| {
-        if has("magick") { return "magick"; }
-        #[cfg(not(target_os = "windows"))]
-        if has("convert") { return "convert"; }
-        "magick"
-    })
+pub fn magick_command() -> String {
+    if let Some(cmd) = resolve_command("magick") {
+        return cmd;
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Some(cmd) = resolve_command("convert") {
+        return cmd;
+    }
+    "magick".to_string()
 }
 
 /// Returns true if Ghostscript is available (any platform-specific binary name).
@@ -338,14 +552,19 @@ pub fn human_bytes(b: u64) -> String {
 }
 
 /// Try to actually initialize an encoder — returns true only if it can start.
-fn probe_encoder(name: &str) -> bool {
-    Command::new("ffmpeg")
-        .args([
-            "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "color=black:s=64x64:d=0.04:r=25",
-            "-c:v", name, "-frames:v", "1",
-            "-f", "null", "-",
-        ])
+fn probe_encoder(name: &str, extra_args: &[&str]) -> bool {
+    let mut args = vec![
+        "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=black:s=256x256:d=0.04:r=25",
+    ];
+    args.extend(extra_args);
+    args.extend([
+        "-c:v", name, "-frames:v", "1",
+        "-f", "null", "-",
+    ]);
+    let ffmpeg = ffmpeg_command();
+    Command::new(ffmpeg)
+        .args(&args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -506,4 +725,10 @@ mod tests {
         assert!(threads >= 1);
         assert!(threads <= cores() * 2); // Sanity check
     }
+}
+
+#[test]
+fn dump_best_encoder() {
+    let enc = best_h264_encoder();
+    panic!("BEST ENCODER IS: {}", enc.name);
 }

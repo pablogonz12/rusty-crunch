@@ -1,6 +1,6 @@
 [package]
 name = "rusty-crunch"
-version = "5.7.1"
+version = "0.5.9"
 edition = "2021"
 
 [dependencies]
@@ -15,7 +15,7 @@ serde_json = "1.0"
 dirs = "5.0"
 notify = "6"
 ctrlc = "3"
-tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "process", "fs"] }
+tokio = { version = "1.50.0", features = ["rt-multi-thread", "macros", "process", "fs", "time"] }
 futures = "0.3.32"
 
 [target.'cfg(unix)'.dependencies]
