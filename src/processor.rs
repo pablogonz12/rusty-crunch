@@ -7,6 +7,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(not(target_os = "windows"))]
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -220,7 +221,7 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
 
     let actual_threads = if job.media_type == MediaType::Video {
         // Keep video parallelism intentionally low to avoid VRAM thrashing.
-        job.threads.max(1).min(2)
+        job.threads.clamp(1, 2)
     } else {
         job.threads.max(1)
     };
@@ -280,7 +281,6 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
             let worst_ratio = &worst_ratio;
             let history_entries = &history_entries;
             let backup_counter = &backup_counter;
-            let session_id = session_id;
             async move {
         // Compute output path (respects optional sub-folder and preserves relative structure)
         let output_path = if let Some(sub) = job.output_subfolder {
@@ -385,14 +385,16 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
 
         match converter::convert(&input_path,
             &final_output_path,
-            job.media_type,
-            job.input_fmt,
-            job.output_fmt,
-            job.normalize_audio,
-            job.quality,
-            job.keep_metadata,
-            job.video_scale,
-            job.image_scale,
+            crate::converter::ConversionOptions {
+                media_type: job.media_type,
+                input_fmt: job.input_fmt,
+                output_fmt: job.output_fmt,
+                normalize_audio: job.normalize_audio,
+                quality: job.quality,
+                keep_metadata: job.keep_metadata,
+                video_scale: job.video_scale,
+                image_scale: job.image_scale,
+            }
         ).await {
             Ok(()) => {
                 let output_size = final_output_path.metadata().map(|m| m.len()).unwrap_or(0);
@@ -528,14 +530,16 @@ pub fn run(job: &Job) -> Result<ConversionSummary> {
             style("┃").dim(),
             style(util::human_bytes(saved)).cyan().bold(),
         );
-    }    if del_errs > 0 {
+    }
+    if del_errs > 0 {
         println!(
             "  {} {} original{} could not be deleted (check permissions)",
             style("\u{2503}").dim(),
             style(del_errs).yellow(),
             if del_errs == 1 { "" } else { "s" },
         );
-    }    if ok > 1 {
+    }
+    if ok > 1 {
         println!(
             "  {} Compression   best: {:.1}%   worst: {:.1}%",
             style("┃").dim(),
@@ -1030,4 +1034,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+
+
+
 

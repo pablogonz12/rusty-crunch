@@ -18,9 +18,12 @@ pub fn cores() -> usize {
 }
 
 /// Module-level cache for `has()` lookups.
-static HAS_CACHE: OnceLock<Mutex<Vec<(String, bool)>>> = OnceLock::new();
+type HasCacheMap = Vec<(String, bool)>;
+static HAS_CACHE: OnceLock<Mutex<HasCacheMap>> = OnceLock::new();
+
 /// Cache for resolved command paths (or not found).
-static RESOLVE_CACHE: OnceLock<Mutex<Vec<(String, Option<String>)>>> = OnceLock::new();
+type ResolveCacheMap = Vec<(String, Option<String>)>;
+static RESOLVE_CACHE: OnceLock<Mutex<ResolveCacheMap>> = OnceLock::new();
 
 /// Resolve a command to an executable path or runnable command token.
 /// On success, returns either an absolute executable path or the command name.

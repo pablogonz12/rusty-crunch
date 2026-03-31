@@ -5,10 +5,11 @@ use anyhow::{bail, Context, Result};
 use std::path::Path;
 use tokio::process::Command;
 use std::process::Stdio;
-use std::sync::Mutex;
+// use std::sync::Mutex; // No longer needed here
+use tokio::sync::Mutex;
 
 /// Global lock for LibreOffice — only one headless instance may run at a time per user profile.
-static LO_LOCK: Mutex<()> = Mutex::new(());
+static LO_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// Run an external command, suppress stdout/stderr, and return a nice error on failure.
 async fn run(cmd: &mut Command, ctx: &str) -> Result<()> {
@@ -38,23 +39,27 @@ async fn run(cmd: &mut Command, ctx: &str) -> Result<()> {
     bail!("{ctx}:\n  {details}");
 }
 
+pub struct ConversionOptions<'a> {
+    pub media_type: MediaType,
+    pub input_fmt: &'a str,
+    pub output_fmt: &'a str,
+    pub normalize_audio: bool,
+    pub quality: Quality,
+    pub keep_metadata: bool,
+    pub video_scale: VideoScale,
+    pub image_scale: ImageScale,
+}
+
 pub async fn convert(
     input: &Path,
     output: &Path,
-    media_type: MediaType,
-    input_fmt: &str,
-    output_fmt: &str,
-    normalize_audio: bool,
-    quality: Quality,
-    keep_metadata: bool,
-    video_scale: VideoScale,
-    image_scale: ImageScale,
+    opts: ConversionOptions<'_>,
 ) -> Result<()> {
-    match media_type {
-        MediaType::Audio => convert_audio(input, output, output_fmt, normalize_audio, quality, keep_metadata).await,
-        MediaType::Video => convert_video(input, output, output_fmt, quality, video_scale, keep_metadata).await,
-        MediaType::Images => convert_image(input, output, output_fmt, quality, image_scale, keep_metadata).await,
-        MediaType::Documents => convert_document(input, output, input_fmt, output_fmt).await,
+    match opts.media_type {
+        MediaType::Audio => convert_audio(input, output, opts.output_fmt, opts.normalize_audio, opts.quality, opts.keep_metadata).await,
+        MediaType::Video => convert_video(input, output, opts.output_fmt, opts.quality, opts.video_scale, opts.keep_metadata).await,
+        MediaType::Images => convert_image(input, output, opts.output_fmt, opts.quality, opts.image_scale, opts.keep_metadata).await,
+        MediaType::Documents => convert_document(input, output, opts.input_fmt, opts.output_fmt).await,
     }
 }
 
@@ -392,7 +397,7 @@ async fn convert_document(input: &Path, output: &Path, in_fmt: &str, out_fmt: &s
     }
 
     // LibreOffice is NOT thread-safe — serialize with a mutex
-    let _guard = LO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = LO_LOCK.lock().await;
     let out_dir = output.parent().unwrap_or(Path::new("."));
     let lo = util::lo_command();
     let mut cmd = Command::new(&lo);

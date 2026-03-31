@@ -5,8 +5,10 @@ use console::style;
 use dialoguer::{theme::ColorfulTheme, MultiSelect};
 use std::process::{Command, Stdio};
 
+type PackageManager = (&'static str, fn(&'static str) -> &'static str);
+
 /// Detect the system package manager and return (install-cmd-prefix, package-map).
-fn detect_pm() -> Option<(&'static str, fn(&'static str) -> &'static str)> {
+fn detect_pm() -> Option<PackageManager> {
     #[cfg(target_os = "windows")]
     {
         if util::has("winget") {
@@ -257,7 +259,7 @@ Write-Host "Installing Ghostscript..."
 Start-Process -FilePath $installer -ArgumentList '/S' -Wait -Verb RunAs
 "#;
         let status = Command::new("powershell")
-            .args(&["-NoProfile", "-Command", script])
+            .args(["-NoProfile", "-Command", script])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -298,7 +300,7 @@ pub fn ensure(media: MediaType) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         if !util::has("winget") && !util::has("choco") && !util::has("scoop") {
-            let names: Vec<&str> = missing.iter().copied().collect();
+            let names: Vec<&str> = missing.to_vec();
             bail!(
                 "Missing tools: {}. No supported package manager found on Windows (winget/choco/scoop).",
                 names.join(", ")
@@ -345,7 +347,7 @@ pub fn ensure(media: MediaType) -> Result<()> {
         let (pm_cmd, pkg_fn) = match detect_pm() {
             Some(pm) => pm,
             None => {
-                let names: Vec<&str> = missing.iter().copied().collect();
+                let names: Vec<&str> = missing.to_vec();
                 bail!(
                     "Missing tools: {}. No supported package manager found — please install them manually.",
                     names.join(", ")

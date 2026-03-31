@@ -233,9 +233,13 @@ pub fn run_headless() -> Result<()> {
         },
     );
 
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
     let result = match cfg.agent_trigger {
-        AgentTrigger::Watch => run_watch(&cfg.agent_rules),
-        AgentTrigger::Periodic(secs) => run_periodic(&cfg.agent_rules, secs),
+        AgentTrigger::Watch => run_watch(&cfg.agent_rules, &rt),
+        AgentTrigger::Periodic(secs) => run_periodic(&cfg.agent_rules, secs, &rt),
     };
 
     println!("Agent stopped (PID {})", std::process::id());
@@ -613,7 +617,7 @@ fn start(cfg: &config::Config) -> Result<()> {
 
 // ── Watch Mode ──────────────────────────────────────────────────────────
 
-fn run_watch(rules: &[AgentRule]) -> Result<()> {
+fn run_watch(rules: &[AgentRule], rt: &tokio::runtime::Runtime) -> Result<()> {
     const MAX_PENDING_EVENTS: usize = 10_000;
 
     let (tx, rx) = mpsc::channel();
@@ -649,7 +653,7 @@ fn run_watch(rules: &[AgentRule]) -> Result<()> {
 
     // Initial scan — catch files added while agent was off
     let mut processed: HashSet<PathBuf> = HashSet::new();
-    let count = scan_and_convert(rules, &mut processed);
+    let count = scan_and_convert(rules, &mut processed, rt);
     if count > 0 {
         println!(
             "  {} Initial scan — {} file{} converted\n",
@@ -699,7 +703,7 @@ fn run_watch(rules: &[AgentRule]) -> Result<()> {
             if path.exists() && !processed.contains(&path) {
                 for rule in rules {
                     if matches_rule(&path, rule) {
-                        if process_file(&path, rule) {
+                        if process_file(&path, rule, rt) {
                             processed.insert(path.clone());
                         }
                         break;
@@ -716,12 +720,12 @@ fn run_watch(rules: &[AgentRule]) -> Result<()> {
 
 // ── Periodic Mode ───────────────────────────────────────────────────────
 
-fn run_periodic(rules: &[AgentRule], interval_secs: u64) -> Result<()> {
+fn run_periodic(rules: &[AgentRule], interval_secs: u64, rt: &tokio::runtime::Runtime) -> Result<()> {
     let interval = interval_secs.max(60); // minimum 1 minute
     let mut processed: HashSet<PathBuf> = HashSet::new();
 
     while !STOP.load(Ordering::Relaxed) {
-        let count = scan_and_convert(rules, &mut processed);
+        let count = scan_and_convert(rules, &mut processed, rt);
         if count > 0 {
             println!(
                 "  {} Scan complete — {} file{} converted",
@@ -745,7 +749,7 @@ fn run_periodic(rules: &[AgentRule], interval_secs: u64) -> Result<()> {
 
 // ── Shared helpers ──────────────────────────────────────────────────────
 
-fn scan_and_convert(rules: &[AgentRule], processed: &mut HashSet<PathBuf>) -> usize {
+fn scan_and_convert(rules: &[AgentRule], processed: &mut HashSet<PathBuf>, rt: &tokio::runtime::Runtime) -> usize {
     let mut count = 0;
     for rule in rules {
         let folder = Path::new(&rule.folder);
@@ -795,7 +799,7 @@ fn scan_and_convert(rules: &[AgentRule], processed: &mut HashSet<PathBuf>) -> us
             .collect();
 
         for file in files {
-            if process_file(&file, rule) {
+            if process_file(&file, rule, rt) {
                 processed.insert(file);
                 count += 1;
             }
@@ -833,7 +837,7 @@ fn matches_rule(path: &Path, rule: &AgentRule) -> bool {
         .unwrap_or(false)
 }
 
-fn process_file(path: &Path, rule: &AgentRule) -> bool {
+fn process_file(path: &Path, rule: &AgentRule, rt: &tokio::runtime::Runtime) -> bool {
     let output_ext = output_extension(&rule.output_fmt);
     let output_path = path.with_extension(&*output_ext);
     let same_ext = path
@@ -850,17 +854,19 @@ fn process_file(path: &Path, rule: &AgentRule) -> bool {
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let input_size = path.metadata().map(|m| m.len()).unwrap_or(0);
 
-    match tokio::runtime::Runtime::new().unwrap().block_on(converter::convert(
+    match rt.block_on(converter::convert(
         path,
         &output_path,
-        rule.media_type,
-        &rule.input_fmt,
-        &rule.output_fmt,
-        false,
-        crate::processor::Quality::High,
-        true,
-        crate::processor::VideoScale::Original,
-        crate::processor::ImageScale::Original,
+        converter::ConversionOptions {
+            media_type: rule.media_type,
+            input_fmt: &rule.input_fmt,
+            output_fmt: &rule.output_fmt,
+            normalize_audio: false,
+            quality: crate::processor::Quality::High,
+            keep_metadata: true,
+            video_scale: crate::processor::VideoScale::Original,
+            image_scale: crate::processor::ImageScale::Original,
+        }
     )) {
 
 
@@ -1029,8 +1035,9 @@ mod tests {
 
         let rule = audio_rule(&dir.display().to_string());
         let mut processed = HashSet::new();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         // scan_and_convert should skip because .flac already exists
-        let count = scan_and_convert(&[rule], &mut processed);
+        let count = scan_and_convert(&[rule], &mut processed, &rt);
         assert_eq!(count, 0);
 
         let _ = fs::remove_dir_all(&dir);

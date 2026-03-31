@@ -116,7 +116,7 @@ pub fn select_output_format(media: MediaType, input_fmt: &str) -> Result<Option<
 
     let idx = Select::with_theme(&theme())
         .with_prompt("Select the output format  (Esc to go back)")
-        .items(&options)
+        .items(options)
         .default(0)
         .interact_opt()?;
 

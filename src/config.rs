@@ -6,16 +6,11 @@ use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DisplayMode {
     Verbose,
+    #[default]
     Clean,
-}
-
-impl Default for DisplayMode {
-    fn default() -> Self {
-        Self::Clean
-    }
 }
 
 impl std::fmt::Display for DisplayMode {
@@ -55,7 +50,7 @@ impl ThreadMode {
         match self {
             Self::Full     => total,
             Self::Balanced => (total / 2).max(1),
-            Self::Saver    => ((total + 3) / 4).max(1),
+            Self::Saver    => total.div_ceil(4),
         }
     }
 }
@@ -93,16 +88,11 @@ pub struct AgentRule {
     pub delete_originals: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AgentTrigger {
+    #[default]
     Watch,
     Periodic(u64),
-}
-
-impl Default for AgentTrigger {
-    fn default() -> Self {
-        Self::Watch
-    }
 }
 
 const fn default_config_version() -> u32 {
